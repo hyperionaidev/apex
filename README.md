@@ -193,7 +193,7 @@ Requirements for each engine:
 Apex is not on PyPI. Install it from the repository:
 
 ```sh
-git clone https://github.com/HyperionAI-Tech/apex && cd apex
+git clone https://github.com/hyperionaidev/apex && cd apex
 uv build && uv tool install dist/apex_verify-*.whl
 apex init            # writes apex.toml, installs the pinned Lean toolchain and Mathlib cache
 apex doctor          # all required items show "ok"; optional items can show "warn"
