@@ -1,6 +1,6 @@
-# Apex
-
-### Democratizing Formal Verification for the Agentic Era
+<p align="center">
+  <img src="docs/assets/apex-header.png" alt="Apex. Democratizing Formal Verification for the Agentic Era." width="100%">
+</p>
 
 Apex verifies Python, JavaScript and TypeScript functions against a statement of their intended
 behavior. It uses three verification engines and gives one report.
