@@ -1,3 +1,5 @@
+# Apex
+
 <p align="center">
   <img src="docs/assets/apex-header.png" alt="Apex. Democratizing Formal Verification for the Agentic Era." width="100%">
 </p>
