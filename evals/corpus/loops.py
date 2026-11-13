@@ -1,5 +1,6 @@
-"""Outside the Lean subset (while loops, recursion Lean cannot show terminates, indexing), but
-the real Python can still be refuted."""
+"""Loops and recursion. Some get a Lean model once Lean proves a termination measure
+(binary_search, fact_rec); others have none Apex can find (isqrt: nonlinear, gcd: `%`, mix: `pow`),
+and the real Python is still refuted or fuzzed."""
 
 
 def isqrt(n: int) -> int:

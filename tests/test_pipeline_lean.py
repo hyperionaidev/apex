@@ -126,3 +126,96 @@ def test_fidelity_is_compared_inside_the_stated_preconditions(
         assert not fn.fidelity.agree and fn.fidelity.mismatch
         assert fn.fidelity.mismatch.inputs["b"] == "0"
         assert fn.properties[0].verdict is Verdict.FIDELITY_FAILED
+
+
+LOOPY = '''
+def find(xs: list[int], t: int) -> int:
+    """post: __return__ >= -1"""
+    for i, x in enumerate(xs):
+        if x == t:
+            return i
+    return -1
+
+
+def count_up(n: int) -> int:
+    """post: __return__ >= 0"""
+    i = 0
+    while i < n:
+        i += 1
+    return i
+
+
+def isqrt(n: int) -> int:
+    """pre: n >= 0
+    post: __return__ >= 0"""
+    r = 0
+    while (r + 1) * (r + 1) <= n:
+        r += 1
+    return r
+'''
+
+
+@pytest.mark.lean
+def test_early_exit_loops_get_proof_tasks_and_the_agent_proof_verifies(
+    tmp_path: Path, lean_project: LeanProject
+) -> None:
+    from apex.pipeline import ApexToolError, lean_goals, lean_run
+
+    (tmp_path / "loopy.py").write_text(LOOPY)
+    ws = Workspace.discover(tmp_path)
+    target = str(tmp_path / "loopy.py::find")
+    sc = scaffold(target, ws, lean_project)
+    assert sc.model_compiles
+    res = prove_tactics(target, ws, project=lean_project)
+    for task in res.tasks:  # whatever the tiers left open comes back as a task
+        assert task.goal and "find.loop1" in task.unfold and task.strategy
+    # The agent explores: the goals left after a script, and Lean commands against the model.
+    goals = lean_goals(target, ws, "P1", "unfold find", project=lean_project)
+    assert goals.goals and not goals.errors, goals.errors
+    run = lean_run(target, ws, "#check @find.loop1\nexample : 1 + 1 = 2 := by sorry", lean_project)
+    assert run.ok and any("find.loop1" in m.message for m in run.messages)
+    with pytest.raises(ApexToolError, match="#eval"):  # code execution is still refused
+        lean_run(target, ws, "#eval 1", lean_project)
+
+
+@pytest.mark.lean
+def test_while_loops_get_a_measure_or_a_checked_one_from_the_agent(
+    tmp_path: Path, lean_project: LeanProject
+) -> None:
+    import pytest as _pytest
+
+    from apex.core.verdict import ReasonCode
+    from apex.pipeline import ApexToolError, set_termination
+
+    (tmp_path / "loopy.py").write_text(LOOPY)
+    ws = Workspace.discover(tmp_path)
+    # Apex finds `(n - i).toNat` itself and records it.
+    sc = scaffold(str(tmp_path / "loopy.py::count_up"), ws, lean_project)
+    assert sc.model_compiles and "count_up.loop1" in ws.termination(
+        __import__("apex.analyze.target", fromlist=["x"]).load_function(
+            str(tmp_path / "loopy.py::count_up")
+        )
+    )
+    # isqrt needs a nonlinear argument: a NONTERMINATION gap that tells the agent what to do.
+    target = str(tmp_path / "loopy.py::isqrt")
+    sc = scaffold(target, ws, lean_project)
+    assert sc.gap is not None and sc.gap.reason_code is ReasonCode.NONTERMINATION
+    assert "apex lean termination" in " ".join(sc.gap.next_steps)
+    # A wrong measure is rejected with Lean's goal and never stored.
+    wrong = set_termination(target, ws, "isqrt.loop1", "r.toNat", project=lean_project)
+    assert not wrong.accepted and wrong.errors
+    with _pytest.raises(ApexToolError):
+        set_termination(target, ws, "isqrt.loop1", "n.toNat", by="sorry", project=lean_project)
+    # A right one (with a nonlinear tactic) is accepted, and the function gets a model.
+    ok = set_termination(
+        target,
+        ws,
+        "isqrt.loop1",
+        "(n - r).toNat",
+        by="all_goals (have key : ∀ a b : Int, (a + 1) * (a + 1) ≤ b → a < b := "
+        "fun a b h => (by nlinarith [sq_nonneg a]); have := key _ _ h'; omega)",
+        imports=["Mathlib.Tactic.Linarith"],
+        project=lean_project,
+    )
+    assert ok.accepted and ok.model_compiles, ok.errors
+    assert scaffold(target, ws, lean_project).model_compiles

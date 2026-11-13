@@ -16,7 +16,8 @@ from apex import __version__
 from apex.skill.install import SKILL_NAME, skill_source
 
 DESCRIPTION = (
-    "Formally verify Python functions with Lean 4: proven / refuted / gap verdicts from Apex."
+    "Formally verify Python, JavaScript and TypeScript functions with Lean 4 (fuzzing and TLA+ "
+    "where proofs do not reach): proven / refuted / gap verdicts from Apex."
 )
 SERVER = {"command": "apex", "args": ["mcp"]}
 

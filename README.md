@@ -341,17 +341,23 @@ Two steps can use an AI model:
 - Writing formal hints from English requirements.
 - Writing proofs that the tactic tiers do not find.
 
-Both steps are optional. Set the model access with `model_provider`:
+Apex assumes a coding agent is available. By default (`auto`) it uses the first coding agent CLI
+that is installed and logged in (Claude Code, then Codex), then an API key. If it finds none, the
+model steps are skipped and the open proofs come back as proof tasks. Set the model access with
+`model_provider`, or with the environment variable `APEX_MODEL_PROVIDER` (for example `none` in
+CI):
 
 | `model_provider` | Access |
 |---|---|
+| `auto` (default) | The first of: `claude-code`, `codex`, `anthropic`, `openai` that is available on this machine. `apex doctor` shows the choice. |
 | `claude-code`, `codex` | The coding agent that is installed and logged in. Apex runs it without a user interface. |
 | `anthropic`, `openai` | An API key in `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` |
-| `host` | The agent that controls Apex writes the hints and proofs. |
-| `none` (default) | No model. All deterministic steps run. |
+| `host` | Only the agent that controls Apex writes the hints and proofs. |
+| `none` | No model. All deterministic steps run. |
 
 ```sh
-apex check src/ --provider claude-code
+apex check src/                         # auto: uses the installed agent CLI
+apex check src/ --provider codex        # or name one
 ```
 
 A proof from a model must obey the same rules as a proof from a person:
@@ -383,6 +389,33 @@ The MCP server (`apex mcp`) supplies the deterministic commands as typed tools, 
 proof, the server returns the Lean errors, the line in the file that the agent edits, and the
 goal state. The smoke tests run Claude Code and Codex through a full cycle: write the code, fail
 verification, read the counterexample, correct the code, pass.
+
+#### The agent writes the proofs Apex's tactics do not find
+
+Apex's tactic tiers close the simple properties. For every theorem they leave open, Apex hands
+the work to the coding agent instead of stopping:
+
+- `apex prove` (MCP `apex_prove`) and `apex lean tasks <target>` (`apex_lean_tasks`) return a
+  proof task per open theorem: the statement, its line in the spec, the goal after `intros`, the
+  definitions to unfold, and a strategy read off the model (a fold needs a generalized
+  accumulator, a loop with early exits is a helper defined by recursion on the list, and so on).
+- `apex lean goals <target> P2 --tactics '...'` (`apex_lean_goals`) shows the goals left after a
+  tactic script, so the agent builds the proof step by step.
+- `apex lean run <target> --code '...'` (`apex_lean_run`) runs Lean commands against the model:
+  `#check`, `#print`, `exact?`, `simp?`, scratch lemmas.
+- `apex lean termination <target> f.loop1 --measure '...'` (`apex_lean_termination`) gives a
+  termination measure for a `while` loop or recursion that Apex's own candidates did not cover.
+
+None of these produce a verdict. The agent writes the proof into the spec file, and `apex verify`
+compiles it cold, audits its axioms and runs the fidelity check, exactly as for a proof from a
+person. Exploration may use `sorry`; the spec may not.
+
+```sh
+apex prove ai_claude.py::is_balanced --tactics-only   # P1 closes; P2 comes back as a proof task
+apex lean goals ai_claude.py::is_balanced P2 --tactics 'unfold is_balanced at h1
+simp only at h1'
+apex verify ai_claude.py::is_balanced                 # after the agent writes P2's proof
+```
 
 ### Existing projects: survey, profile, references, decisions
 
@@ -472,8 +505,8 @@ Refutation runs during each check. It uses these methods:
 - CrossHair symbolic execution. CrossHair finds rare inputs that random search does not find.
 
 A fuzzing campaign runs for a longer time and records its results. Use it for code that Lean
-cannot model (for example `while` loops or array indexing), or for properties that Lean did not
-prove.
+cannot model (for example strings, floats, or a loop Lean cannot show terminates), or for
+properties that neither the tactics nor the agent proved.
 
 ```sh
 apex fuzz loops.py::isqrt --seconds 30          # Hypothesis campaign, recorded for each property
@@ -565,7 +598,7 @@ fidelity check run the real JavaScript in Node.js.
 | `number` | A 64-bit float. Integer arithmetic is exact only up to 2⁵³ − 1. Proofs get `proven_conditional`, with the precondition that each intermediate value is a safe integer. Searches skip inputs outside this range. |
 | `bigint` | Exact. Proofs can get `proven`. |
 | Kept semantics | `%` truncates toward zero (`-3 % 2` is `-1`). Only `Math.floor(a / b)` and `Math.trunc(a / b)` are integer division. `===` on arrays compares references, thus Apex does not accept it. |
-| Not accepted by the Lean model | `==` (type conversion), bitwise operators (32-bit), `this`, classes, `try`, `switch`, strings, floats, indexing, `while`, `return` in a loop. Refutation and fuzzing still run such functions when they are pure. A `number` parameter is drawn as a float when a profile domain says so, or when float code has a decimal example or an `--exact` reference. |
+| Not accepted by the Lean model | `==` (type conversion), bitwise operators (32-bit), `this`, classes, `try`, `switch`, strings, floats, array indexing (`undefined` out of range). Refutation and fuzzing still run such functions when they are pure. A `number` parameter is drawn as a float when a profile domain says so, or when float code has a decimal example or an `--exact` reference. |
 | Impure code | `console`, `Math.random`, `Date`, `fs`, `process`, `fetch`, timers, `async`, and changes to an argument. Apex finds these before it runs the code. |
 | Exports | A function that the module does not export runs from the module's import-free copy, if it uses no import. |
 | Engines | Lean 4 (proofs). Hypothesis and Jazzer.js (fuzzing). CrossHair and TLA+ are available for Python only. |
@@ -590,7 +623,7 @@ fidelity check run the real JavaScript in Node.js.
 
 ```toml
 [apex]
-model_provider = "none"            # none | claude-code | codex | anthropic | openai | host
+model_provider = "auto"            # auto | claude-code | codex | anthropic | openai | host | none
 # model = "..."                    # if not set, the default model of the provider
 proof_budget_s = 120               # for each theorem: Lean time for one compile of its proof
 refute_budget_s = 10               # CrossHair time for each property
@@ -764,12 +797,17 @@ no specified behavior.
 [docs/LIMITS.md](docs/LIMITS.md) gives the full list. Summary:
 
 - **Lean 4 subset.**
-  - These items are not supported: `str`, `float`, `dict`, `set`, classes, `while` loops,
-    recursion, indexing, `return` in a loop, exceptions, module constants, and calls into other
-    modules.
-  - Of 10 Python functions that Claude Code and Codex wrote from one-line prompts, 3 are in the
-    subset. The other 7 go to the fuzzing and refutation engine.
-  - Many functions fit after a small change. The gap message gives the line.
+  - These items are not supported: `str`, `float`, `dict`, `set`, classes, `try`, module
+    constants, and calls into other modules.
+  - `while` loops and recursion need a termination measure that Lean proves. Apex tries some;
+    the coding agent can give one. A loop that terminates only under the preconditions has no
+    model.
+  - A proof covers the inputs on which the Python returns. Where the Python raises (an index out
+    of range, `x // 0`), the model returns a default; the fidelity check and refutation report
+    such inputs, and a precondition excludes them.
+  - Of 10 Python functions that Claude Code and Codex wrote from one-line prompts, 9 have a Lean
+    model. Having a model is not having a proof: Apex's tactics prove the simple properties, and
+    the coding agent writes the rest from Apex's proof tasks.
 - **Fuzzing.** A `fuzzed` verdict can occur for a function that has an error. In one test, a
   20-second campaign did not find a planted error that a 60-second campaign found. CrossHair, not
   the fuzzers, finds errors that need one exact input value.
@@ -798,10 +836,10 @@ JavaScript and TypeScript.
 
 | Category | Python | JavaScript and TypeScript |
 |---|---|---|
-| Correct functions, most with hand-written Lean reference statements | 49 | 19 |
+| Correct functions, most with hand-written Lean reference statements | 51 | 20 |
 | Planted errors | 33 | 8 |
 | Specification and code conflicts | 15 | 3 |
-| Out-of-scope functions | 15 | 9 |
+| Out-of-scope functions | 13 | 8 |
 | Functions that Claude Code and Codex wrote, without changes | 10 | 6 |
 | Concurrent functions with TLA+ bundles | 4 | 0 |
 
@@ -814,10 +852,10 @@ JavaScript and TypeScript.
 | Cases with the expected verdicts | 171 of 171 (Python 126 of 126, JavaScript and TypeScript 45 of 45) |
 | Planted errors found with a counterexample | 63 of 63 (2 found only by a fuzzing campaign) |
 | Conflicts found | 22 of 22 |
-| Out-of-scope functions with the correct reason code | 24 of 24 |
+| Out-of-scope functions with the correct reason code | 21 of 21 |
 | Generated statements that Lean shows equal to the reference statement | 67 of 99 |
 | True properties proven (JavaScript `number` properties as `proven_conditional`) | 168 of 294 |
-| Agent-written functions in the Lean subset | 7 of 16 |
+| Agent-written functions in the Lean subset | 13 of 16 (7 before phase 9) |
 | Evidence verdicts | 24 `fuzzed`, 3 `model_checked` |
 | Median time for each function | 8.7 s |
 
@@ -865,6 +903,7 @@ tests/           unit, Lean, installation, TLA+ and JavaScript tests; canaries; 
 | 6 | Fuzzing and refutation engine (campaigns), TLA+ engine for concurrent code |
 | 7 | JavaScript and TypeScript: conversion to the shared subset, Node.js bridge, JSDoc, Jest and fast-check intent, Jazzer.js |
 | 8 | App code: JSX, bundler modules, runnable types, project profile and survey, reference properties (refactors, exact arithmetic), decision records, TLA+ controls |
+| 9 | A larger Lean subset (early exits from loops, `while` loops and recursion with checked termination measures, indexing and slices, guard clauses, truthiness, `Optional` narrowing, more builtins) and proof work handed to the coding agent (proof tasks, goal states, Lean scratch commands, termination measures) |
 
 ## License
 

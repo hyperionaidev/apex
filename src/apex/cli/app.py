@@ -23,12 +23,14 @@ if TYPE_CHECKING:
     from apex.core.report import Report
     from apex.intent.proposals import ProposalCheck
     from apex.pipeline import Workspace
+    from apex.prove.explore import ProofTask
     from apex.skill.install import SkillInstallResult
 
 app = typer.Typer(
     no_args_is_help=True,
     add_completion=False,
-    help="Formal verification of Python functions with Lean 4.",
+    help="Formal verification of Python, JavaScript and TypeScript functions: Lean 4 proofs, "
+    "TLA+ model checking, and fuzzing where proofs do not reach.",
 )
 dev = typer.Typer(help="Developer commands for the Lean harness.", no_args_is_help=True)
 app.add_typer(dev, name="dev", hidden=True)
@@ -50,11 +52,13 @@ _STATUS_STYLE = {
 CONFIG_TEMPLATE = """\
 [apex]
 schema_version = "1"
-# How LLM steps reach a model (default: none; every deterministic verb works without one):
+# How model steps (formal hints, proofs) reach a model. Default: auto, the first of the
+# coding agent CLIs you have installed and logged in (claude-code, codex), then an API key.
 #   anthropic | openai   API key from ANTHROPIC_API_KEY / OPENAI_API_KEY
-#   claude-code | codex  the coding agent CLI you already have installed and logged in
-#   host                 the agent driving Apex proposes, via `apex intent submit`
-model_provider = "none"
+#   claude-code | codex  that coding agent CLI
+#   host                 only the agent driving Apex proposes (`apex intent submit`, proof tasks)
+#   none                 no model calls; every deterministic verb still works
+model_provider = "auto"
 # model = "..."                    # optional; unset means the provider's default
 proof_budget_s = 120               # per theorem: Lean time for one compile of its proof
 refute_budget_s = 10               # CrossHair time per property
@@ -860,15 +864,23 @@ def prove(
     written into the spec only when Lean accepts them; the verdict still comes from `verify`.
     """
     from apex import pipeline
-    from apex.llm.providers import ProviderError, get_provider
+    from apex.llm.providers import ProviderError, get_provider, resolve_provider
 
     ws = _workspace(as_json)
     llm = None
-    if not tactics_only:
+    auto_without_model = (provider or ws.config.model_provider) == "auto" and resolve_provider(
+        ws.config, provider
+    ) == "none"
+    if not tactics_only and not auto_without_model:
         try:
             llm = get_provider(ws.config, provider)
         except ProviderError as e:
             _fail(as_json, f"{e}. Or run `apex prove {target} --tactics-only`.")
+    if auto_without_model and not tactics_only and not (as_json or markdown):
+        console.print(
+            "no coding agent CLI or API key found for model_provider = auto: tactic tiers only; "
+            "open theorems come back as proof tasks"
+        )
     quiet = as_json or markdown
     with _tool_errors(as_json):
         result = pipeline.prove_tactics(target, ws, spec_path=spec)
@@ -877,6 +889,8 @@ def prove(
                 f"tactic tiers closed: {', '.join(result.closed) or 'none'}; still open: "
                 f"{', '.join(result.open) or 'none'}  ({result.duration_s}s)"
             )
+            if llm is None:
+                _print_tasks(result.tasks)
         if llm is not None and result.open:
             if not quiet:
                 console.print(f"asking {llm.name} for {', '.join(result.open)} ...")
@@ -901,6 +915,151 @@ def prove(
             provider=llm.name if llm else None,
         )
     _emit_report(report, as_json, markdown, sarif)
+
+
+def _print_tasks(tasks: "list[ProofTask]") -> None:
+    for t in tasks:
+        console.print(f"\n[bold]proof task {t.property_id}[/bold]  {t.spec_file}:{t.line}")
+        console.print(f"  {escape(t.statement)}", highlight=False)
+        if t.goal:
+            console.print("  goal after intros:", highlight=False)
+            for ln in t.goal.splitlines():
+                console.print(f"    {escape(ln)}", highlight=False)
+        console.print(f"  unfold: {escape(', '.join(t.unfold))}", highlight=False)
+        for hint in t.strategy:
+            console.print(f"  - {escape(hint)}", highlight=False)
+        for c in t.commands:
+            console.print(f"  $ {escape(c)}", highlight=False)
+
+
+lean_app = typer.Typer(
+    help="Lean proof work for the coding agent: open proof tasks, goal states, scratch "
+    "commands against the model, termination measures. Exploration, never a verdict.",
+    no_args_is_help=True,
+)
+app.add_typer(lean_app, name="lean")
+
+
+@lean_app.command("tasks")
+def lean_tasks(target: Target, as_json: JsonFlag = False) -> None:
+    """A proof task per open theorem: statement, goal after `intros`, definitions to unfold,
+    and a strategy read off the model."""
+    from apex import pipeline
+    from apex.lean.project import LeanProject
+
+    ws = _workspace(as_json)
+    with _tool_errors(as_json):
+        a = pipeline._analyze(target, ws)
+        if a.model is None:
+            _fail(as_json, f"{target} has no Lean model: {a.gap.explanation if a.gap else ''}")
+        path = ws.spec_path(a.info)
+        spec = pipeline.load_spec(path)
+        open_ = [d for d in spec.properties if not d.has_proof]
+        tasks = pipeline.proof_tasks(a, spec, open_, path, LeanProject.locate())
+    if as_json:
+        from apex.prove.explore import ProofTasks
+
+        typer.echo(ProofTasks(target=target, tasks=tasks).model_dump_json(indent=2))
+    elif not tasks:
+        console.print("no open theorems")
+    else:
+        _print_tasks(tasks)
+
+
+@lean_app.command("goals")
+def lean_goals(
+    target: Target,
+    property_id: Annotated[str, typer.Argument(help="Theorem in the spec (P1, E2, ...).")],
+    tactics: Annotated[
+        str | None,
+        typer.Option("--tactics", help="Tactic script to run first (default: `intros`)."),
+    ] = None,
+    tactics_file: Annotated[
+        Path | None, typer.Option("--file", help="Read the tactic script from a file.")
+    ] = None,
+    as_json: JsonFlag = False,
+) -> None:
+    """The goals a theorem has left after a tactic script (`sorry` is allowed here)."""
+    from apex import pipeline
+
+    script = tactics_file.read_text() if tactics_file else tactics
+    with _tool_errors(as_json):
+        res = pipeline.lean_goals(target, _workspace(as_json), property_id, script)
+    if as_json:
+        typer.echo(res.model_dump_json(indent=2))
+        return
+    if res.closed:
+        console.print("no goals left (now put the proof in the spec and run `apex verify`)")
+    for k, g in enumerate(res.goals, 1):
+        console.print(f"goal {k}:", highlight=False)
+        console.print(escape(g), highlight=False)
+    for e in res.errors:
+        console.print(f"error ({e.file} line {e.line}): {escape(e.message)}", highlight=False)
+
+
+@lean_app.command("run")
+def lean_run(
+    target: Target,
+    code: Annotated[
+        str | None, typer.Option("--code", help="Lean commands: #check, example, exact?, ...")
+    ] = None,
+    code_file: Annotated[
+        Path | None, typer.Option("--file", help="Read the commands from a file.")
+    ] = None,
+    as_json: JsonFlag = False,
+) -> None:
+    """Run Lean commands after the model and the spec's helper lemmas."""
+    from apex import pipeline
+
+    text = code_file.read_text() if code_file else code
+    if not text:
+        _fail(as_json, "give the commands with --code or --file")
+    with _tool_errors(as_json):
+        res = pipeline.lean_run(target, _workspace(as_json), text)
+    if as_json:
+        typer.echo(res.model_dump_json(indent=2))
+        return
+    for m in res.messages:
+        console.print(f"{m.severity} (line {m.line}): {escape(m.message)}", highlight=False)
+    if not res.messages:
+        console.print("ok, no messages")
+
+
+@lean_app.command("termination")
+def lean_termination(
+    target: Target,
+    definition: Annotated[
+        str, typer.Argument(help="The while helper or recursive function (e.g. f.loop1).")
+    ],
+    measure: Annotated[
+        str, typer.Option("--measure", help="Lean term of type Nat that decreases.")
+    ],
+    by: Annotated[
+        str | None, typer.Option("--by", help="Tactic proving it decreases (decreasing_by).")
+    ] = None,
+    imports: Annotated[
+        list[str] | None, typer.Option("--import", help="Mathlib module the tactic needs.")
+    ] = None,
+    as_json: JsonFlag = False,
+) -> None:
+    """Give a termination measure for a while loop or recursive function; Lean checks it."""
+    from apex import pipeline
+
+    with _tool_errors(as_json):
+        res = pipeline.set_termination(
+            target, _workspace(as_json), definition, measure, by, imports
+        )
+    if as_json:
+        typer.echo(res.model_dump_json(indent=2))
+    elif res.accepted:
+        console.print(f"accepted: {definition} terminates by `{escape(measure)}`")
+        if res.needs_measure:
+            console.print(f"still without a measure: {', '.join(res.needs_measure)}")
+    else:
+        console.print(f"rejected: Lean could not prove `{escape(measure)}` decreases")
+        for e in res.errors:
+            console.print(f"  line {e.line}: {escape(e.message)}", highlight=False)
+    raise typer.Exit(0 if res.accepted else 1)
 
 
 @app.command()

@@ -1,0 +1,96 @@
+{
+  "$defs": {
+    "LeanError": {
+      "additionalProperties": false,
+      "description": "One Lean error on a rejected proof, positioned in the file the author edits.",
+      "properties": {
+        "column": {
+          "title": "Column",
+          "type": "integer"
+        },
+        "file": {
+          "title": "File",
+          "type": "string"
+        },
+        "goal": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Goal"
+        },
+        "line": {
+          "title": "Line",
+          "type": "integer"
+        },
+        "message": {
+          "title": "Message",
+          "type": "string"
+        }
+      },
+      "required": [
+        "file",
+        "line",
+        "column",
+        "message"
+      ],
+      "title": "LeanError",
+      "type": "object"
+    }
+  },
+  "properties": {
+    "closed": {
+      "title": "Closed",
+      "type": "boolean"
+    },
+    "errors": {
+      "items": {
+        "$ref": "#/$defs/LeanError"
+      },
+      "title": "Errors",
+      "type": "array"
+    },
+    "goals": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Goals",
+      "type": "array"
+    },
+    "note": {
+      "default": "Exploration only, never a verdict: write the proof into the spec file and run `apex verify`.",
+      "title": "Note",
+      "type": "string"
+    },
+    "property_id": {
+      "title": "Property Id",
+      "type": "string"
+    },
+    "statement": {
+      "title": "Statement",
+      "type": "string"
+    },
+    "tactics": {
+      "title": "Tactics",
+      "type": "string"
+    },
+    "target": {
+      "title": "Target",
+      "type": "string"
+    }
+  },
+  "required": [
+    "target",
+    "property_id",
+    "statement",
+    "tactics",
+    "closed"
+  ],
+  "title": "LeanGoals",
+  "type": "object"
+}

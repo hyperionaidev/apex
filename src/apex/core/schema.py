@@ -23,6 +23,7 @@ from apex.intent.proposals import ProposalCheck, ProposalSet
 from apex.intent.references import ReferenceResult, ReferenceSet
 from apex.lean.compiler import CompileResult
 from apex.pipeline import AnalyzeResult, ProveResult, ScaffoldResult
+from apex.prove.explore import LeanGoals, LeanRunResult, ProofTasks, TerminationResult
 from apex.report.explain import AdviceList
 from apex.skill.install import SkillInstallResult
 from apex.survey import Survey
@@ -56,6 +57,10 @@ CONTRACTS: dict[str, type[BaseModel]] = {
     "reference_result": ReferenceResult,
     "reference_set": ReferenceSet,
     "decision": Decision,
+    "proof_tasks": ProofTasks,
+    "lean_goals": LeanGoals,
+    "lean_run_result": LeanRunResult,
+    "termination_result": TerminationResult,
 }
 
 # Which schema each command's `--json` output follows (on exit 3, always `tool_error`).
@@ -85,6 +90,10 @@ CLI_OUTPUTS: dict[str, str] = {
     "reference add": "reference_result",
     "reference list": "reference_set",
     "decide": "decision",
+    "lean tasks": "proof_tasks",
+    "lean goals": "lean_goals",
+    "lean run": "lean_run_result",
+    "lean termination": "termination_result",
 }
 
 

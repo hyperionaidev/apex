@@ -47,28 +47,42 @@ The translator accepts a deliberately small subset. Anything outside it makes th
 
 | Supported | Not supported (reason code) |
 |---|---|
-| `int` (unbounded, like Python), `bool`, `list[int]`-style lists, fixed tuples, `Optional` returns | `str`, `float` (`FLOAT_SEMANTICS`), `dict`, `set`, classes, `Optional` *parameters* narrowed with `is None` |
-| `if` / `elif` / `else`, conditional expressions, `and` / `or` / `not` | `while` loops (`NONTERMINATION`) |
-| `for` over a list or `range(...)`, nested loops, list comprehensions with filters | `return`, `break` or `continue` inside a loop: accumulate a result instead |
-| `+ - * // % **`, comparisons (also chained), `in` on lists | indexing `xs[i]` (can raise `IndexError`); slices only with literal bounds |
-| `len`, `abs`, `sum`, `min`/`max` of two values, `any` | `sorted`, `set`, `enumerate`, `zip`, `reversed`, `list(...)`, `isinstance` |
+| `int` (unbounded, like Python), `bool`, `list[int]`-style lists, fixed tuples, `Optional` values (narrowed by `is None` tests) | `str`, `float` (`FLOAT_SEMANTICS`), `dict`, `set`, classes |
+| `if` / `elif` / `else`, conditional expressions, `and` / `or` / `not`, truthiness of ints, lists and Optionals | `try`, `while ... else`, `for ... else` |
+| `for` over a list, `range(...)` or `enumerate(...)`, with or without `return` / `break` / `continue`; list comprehensions with filters | `while` loops and recursion whose termination Lean cannot prove (`NONTERMINATION`): Apex tries measures, the coding agent can supply one |
+| `while` loops and recursion, once Lean has proved a termination measure | |
+| `+ - * // % **`, comparisons (also chained), `in` on lists and ranges | |
+| indexing `xs[i]`, `xs[i] = v` on a local list, slices `xs[a:b]` (Python's negative-index rules) | slices with a step |
+| `len`, `abs`, `sum` (also of a generator), `min`/`max`, `sorted`, `reversed`, `enumerate`, `zip`, `divmod`, `xs.count` | `set`, `isinstance`, `sorted(key=...)`, other methods |
 | calls to other functions in the same module | calls into other modules (`from math import gcd`), lambdas, nested functions |
-| local variables, `out.append(...)` on a local list | module-level constants and globals; mutating an argument (`IMPURE_IO`) |
-| leading `assert`s (as preconditions) | `assert` later in the body, `raise`, `try` |
-| | recursion, in practice: Lean's automatic termination check does not see that `n - 1`, `a % b` or `xs[1:]` decreases (`NONTERMINATION`); use a `for` loop |
+| local variables, `out.append(...)` / `out.extend(...)` on a local list | module-level constants and globals; mutating an argument (`IMPURE_IO`) |
+| leading `assert`s and guard clauses `if <c>: raise ...` (as preconditions); `raise` elsewhere (see below) | `assert` later in the body |
 | | I/O, randomness, clocks (`IMPURE_IO`), threads (`NEEDS_CONCURRENCY_TOOL`: see TLA+ below), `async` |
-| | Python truthiness of lists (`if xs:`): compare explicitly, `len(xs) == 0` |
 
-Many of these are fixable by rewriting. `for i in range(n)` instead of `while`, and an
-accumulator instead of an early `return`, both stay in the subset. The gap message names the
-line and suggests the rewrite.
+**Termination.** A `while` loop or a recursive function becomes a Lean definition by
+well-founded recursion, so Lean must prove it terminates on every input before the model exists.
+Apex tries measures read off the loop condition (`i < n` gives `n - i`) and the parameters; when
+none works, the gap is `NONTERMINATION` with the goal Lean could not prove, and the coding agent
+can give a measure (`apex lean termination`), which Lean checks like any proof. A loop that
+terminates only under the function's preconditions (`while n:` where `n >= 0` is required)
+cannot be shown to terminate inside its definition, which knows nothing of the preconditions.
+
+**Where Python raises.** A proof is partial correctness: it says what the result is on every
+input that satisfies the preconditions *and on which the Python returns*. Where the Python raises
+(an index out of range, `x // 0`, `min([])`, a `raise` after other code) the model returns a
+default value instead. That case is never silent: the fidelity check treats any Python exception
+as a disagreement (the proof is discarded as `fidelity_failed`), and refutation reports an input
+that satisfies the preconditions and makes the Python raise as a counterexample (`refuted`). A
+proof can still stand while such an input exists if neither search finds it. To rule those
+inputs out, state the precondition: a leading `assert`, a guard clause, or `pre:`.
 
 How much real code is in the subset? In the eval corpus, ten functions were written by Claude
-Code and Codex from one-line prompts and left unedited. Only 3 of the 10 fall in the subset.
-The rest use early returns, indexing, `while`, truthiness, `None` as a running value, or
-`raise`. For those, Apex's answer is refutation and a fuzzing campaign (no counterexample, and all ten
-are in fact correct): `fuzzed`, not `proven`. Writing code to the subset is a choice you make; Apex will not
-silently approximate code outside it.
+Code and Codex from one-line prompts and left unedited. Nine of the ten now have a Lean model:
+the subset covers their early returns, indexing, `while` loops, truthiness and `None` as a
+running value. The tenth, `digit_sum`, loops `while n:`, which diverges for negative `n`; its
+guard clause excludes those, but the loop's own definition cannot use it. Having a model does not
+make a proof automatic: Apex's tactics close the simple properties, and the coding agent writes
+the rest from the proof tasks Apex returns (the goal, the definitions to unfold, a strategy).
 
 ## JavaScript and TypeScript
 
@@ -96,9 +110,10 @@ with JavaScript's own rules on top:
   - `===` on arrays is identity, so it's refused in code (in hints it means equal contents);
   - `==` coerces types, so it's refused;
   - bitwise operators are 32-bit, so they're refused.
-- **Not modelled:** strings, objects and classes, `this`, `try`, `switch`, indexing, `while`,
-  early returns in loops, default and rest parameters, generators. As in Python, many functions
-  fit after a small rewrite.
+- **Not modelled:** strings, objects and classes, `this`, `try`, `switch`, array indexing (out of
+  range, JS gives `undefined` instead of failing, which the model cannot express), testing an
+  array's truthiness (always true in JS), default and rest parameters, generators. `while`
+  loops and early exits from loops are modelled as in Python.
 - **Not yet for JS:** CrossHair (Python-only symbolic execution) and TLA+ (async and event-loop
   concurrency). Fuzzing uses Hypothesis or Jazzer.js.
 - **Agent-written code.** Of six TypeScript functions written by Claude Code and Codex from

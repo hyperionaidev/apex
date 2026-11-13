@@ -30,6 +30,10 @@ TOOLS = {
     "apex_survey",
     "apex_reference_add",
     "apex_decision_ask",
+    "apex_lean_tasks",
+    "apex_lean_goals",
+    "apex_lean_run",
+    "apex_lean_termination",
 }
 
 

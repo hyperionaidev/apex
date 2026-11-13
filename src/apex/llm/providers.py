@@ -241,8 +241,35 @@ PROVIDERS = {
 }
 
 
-def get_provider(config: ApexConfig, override: str | None = None) -> Provider:
+AUTO_ORDER = ("claude-code", "codex", "anthropic", "openai")
+"""What `model_provider = "auto"` uses: an installed coding agent CLI first (it spends the user's
+existing subscription), then an API key."""
+
+
+def auto_provider() -> str:
+    """The provider `auto` resolves to on this machine, or `none`."""
+    clis = available_agent_clis()
+    keys = api_keys_present()
+    for name in AUTO_ORDER:
+        if clis.get(name) or keys.get(name):
+            return name
+    return "none"
+
+
+def resolve_provider(config: ApexConfig, override: str | None = None) -> str:
+    """The provider a run uses: `auto` resolved, anything else as configured."""
     name = override or config.model_provider
+    return auto_provider() if name == "auto" else name
+
+
+def get_provider(config: ApexConfig, override: str | None = None) -> Provider:
+    auto = (override or config.model_provider) == "auto"
+    name = resolve_provider(config, override)
+    if name == "none" and auto:
+        raise ProviderError(
+            "model_provider is `auto` and no coding agent CLI (claude, codex) or API key "
+            "(ANTHROPIC_API_KEY, OPENAI_API_KEY) was found"
+        )
     if name == "none":
         raise ProviderError(
             "no model provider configured: set model_provider in apex.toml (anthropic, openai, "
@@ -256,7 +283,10 @@ def get_provider(config: ApexConfig, override: str | None = None) -> Provider:
         )
     if name not in PROVIDERS:
         raise ProviderError(f"unknown provider `{name}`; choose one of {', '.join(PROVIDERS)}")
-    model = config.model if override is None or override == config.model_provider else None
+    # `model` names a model of the configured provider; under `auto` it is not known which.
+    explicit = config.model_provider not in ("auto", "none", "host")
+    same = override is None or override == config.model_provider
+    model = config.model if explicit and same else None
     return PROVIDERS[name](model, config.llm_timeout_s)
 
 

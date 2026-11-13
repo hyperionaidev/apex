@@ -122,15 +122,20 @@ def test_lean_keywords_are_escaped(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("src", "code"),
     [
-        (
-            "def f(x: int) -> int:\n    while x > 0:\n        x -= 1\n    return x\n",
-            ReasonCode.NONTERMINATION,
-        ),
         ("def f(x: int) -> int:\n    return x / 2\n", ReasonCode.FLOAT_SEMANTICS),
         ("def f(x: float) -> float:\n    return x\n", ReasonCode.FLOAT_SEMANTICS),
-        ("def f(xs: list[int]) -> int:\n    return xs[0]\n", ReasonCode.UNSUPPORTED_CONSTRUCT),
         (
-            "def f(x: int) -> int:\n    if x:\n        return 1\n    return 0\n",
+            "def f(x: int) -> int:\n    try:\n        return x\n    except ValueError:\n"
+            "        return 0\n",
+            ReasonCode.UNSUPPORTED_CONSTRUCT,
+        ),
+        (
+            "def f(xs: list[int]) -> list[int]:\n    return sorted(xs, key=abs)\n",
+            ReasonCode.UNSUPPORTED_CONSTRUCT,
+        ),
+        (
+            "def f(x: int) -> int:\n    y = 0\n    while x > 0:\n        x -= 1\n"
+            "        y += 1\n    else:\n        y = 5\n    return y\n",
             ReasonCode.UNSUPPORTED_CONSTRUCT,
         ),
         (
@@ -218,3 +223,142 @@ def test_bad_targets(tmp_path: Path) -> None:
         with pytest.raises(TargetError):
             load_function(bad)
     assert ast.parse(path.read_text())
+
+
+def test_early_exits_become_a_structural_helper(tmp_path: Path) -> None:
+    m = translate(
+        load_function(
+            f"""{
+                _write(
+                    tmp_path,
+                    '''
+        def f(xs: list[int]) -> bool:
+            total = 0
+            for x in xs:
+                total += x
+                if total < 0:
+                    return False
+            return total == 0
+    ''',
+                )
+            }::f"""
+        )
+    )
+    assert "def f.loop1 (xs' : List Int) (total : Int) : Sum Bool (Int) :=" in m.text
+    assert "(Sum.inl false)" in m.text and "| .inl r' => r'" in m.text
+    assert m.aux_names == ["f.loop1"] and m.recursive == []
+
+
+def test_break_and_continue(tmp_path: Path) -> None:
+    out = model(
+        tmp_path,
+        """
+        def f(xs: list[int]) -> int:
+            n = 0
+            for x in xs:
+                if x < 0:
+                    continue
+                if x > 100:
+                    break
+                n += x
+            return n
+    """,
+    )
+    # continue recurses on the tail, break leaves with the current state
+    assert "(f.loop1 tl' n)" in out and "  | [] => n" in out
+
+
+def test_while_loop_gets_measure_candidates(tmp_path: Path) -> None:
+    m = translate(
+        load_function(
+            f"""{
+                _write(
+                    tmp_path,
+                    '''
+        def f(n: int) -> int:
+            i = 0
+            while i < n:
+                i += 1
+            return i
+    ''',
+                )
+            }::f"""
+        )
+    )
+    assert "if h' : (i < n) then" in m.text
+    assert m.recursive == ["f.loop1"]
+    assert m.candidates["f.loop1"][0].measure == "(n - i).toNat"
+    # With a measure, the helper carries it.
+    from apex.translate.lean import Termination
+
+    info = load_function(f"{tmp_path / 'm.py'}::f")
+    m2 = translate(info, {"f.loop1": Termination("(n - i).toNat")})
+    assert "termination_by (n - i).toNat" in m2.text and "decreasing_by" in m2.text
+
+
+def test_guard_clauses_are_preconditions(tmp_path: Path) -> None:
+    from apex.translate.lean import leading_asserts
+
+    src = """
+        def f(n: int) -> int:
+            \"\"\"Doc.\"\"\"
+            if n < 0:
+                raise ValueError("negative")
+            assert n < 100
+            return n + 1
+    """
+    out = model(tmp_path, src)
+    assert "raise" not in out and out.strip().endswith("(n + (1 : Int))")
+    pres = leading_asserts(load_function(f"{tmp_path / 'm.py'}::f").node)
+    assert [ast.unparse(a.test) for a in pres] == ["not n < 0", "n < 100"]
+
+
+def test_indexing_slices_and_truthiness(tmp_path: Path) -> None:
+    out = model(
+        tmp_path,
+        """
+        def f(xs: list[int], i: int) -> list[int]:
+            out: list[int] = []
+            if xs and xs[-1] > 0:
+                out.append(xs[i])
+            out[0] = 1
+            return out + xs[i:]
+    """,
+    )
+    assert "(xs ≠ [])" in out and "(Apex.pyGet xs (-1 : Int))" in out
+    assert "(Apex.pySet out (0 : Int) (1 : Int))" in out
+    assert "(Apex.pySlice xs i (xs.length : Int))" in out
+
+
+def test_optional_narrowing_and_inferred_locals(tmp_path: Path) -> None:
+    out = model(
+        tmp_path,
+        """
+        def f(xs: list[int]) -> int | None:
+            best = None
+            for x in xs:
+                if best is None or x > best:
+                    best = x
+            return best
+    """,
+    )
+    assert "let best : (Option Int) := none" in out
+    assert "Option.all (fun best => decide (x > best)) best = true" in out
+
+
+def test_builtins(tmp_path: Path) -> None:
+    out = model(
+        tmp_path,
+        """
+        def f(xs: list[int], lo: int) -> int:
+            q, r = divmod(lo, 10)
+            n = sum(x > lo for x in xs) + max(sorted(xs)) + len(list(reversed(xs)))
+            for i, x in enumerate(xs):
+                n += i * x
+            return n + q + r + xs.count(lo)
+    """,
+    )
+    assert "let q := (Apex.pyFloorDiv lo (10 : Int))" in out  # divmod split into lets
+    assert "(if (x > lo) then (1 : Int) else 0)" in out
+    assert "(Apex.pyMaxList (Apex.pySorted xs))" in out and "xs.reverse" in out
+    assert "(Apex.pyEnumerate xs).foldl (fun n (i, x) =>" in out

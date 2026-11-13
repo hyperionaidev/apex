@@ -1,5 +1,6 @@
 """`apex.toml` configuration."""
 
+import os
 import tomllib
 from pathlib import Path
 from typing import Literal
@@ -10,18 +11,23 @@ from apex.core.verdict import Verdict
 
 SCHEMA_VERSION = "1"
 CONFIG_FILENAME = "apex.toml"
+PROVIDER_ENV = "APEX_MODEL_PROVIDER"
 
 
 class ApexConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     schema_version: Literal["1"] = SCHEMA_VERSION
-    # The default engine-mode provider is an open decision (handoff section 12); until it is made,
-    # LLM steps are opt-in and deterministic verbs work with no provider at all.
+    # Apex assumes a coding agent is at hand (decided 2026-11-13):
+    #   auto (default)         -> the first of: claude-code, codex (installed CLIs), anthropic,
+    #                             openai (API keys); none found: deterministic steps only
     #   anthropic | openai     -> API key from ANTHROPIC_API_KEY / OPENAI_API_KEY
     #   claude-code | codex    -> the coding agent CLI already installed and logged in
     #   host                   -> the agent driving Apex proposes, via `apex intent submit`
-    model_provider: Literal["anthropic", "openai", "claude-code", "codex", "host", "none"] = "none"
+    #   none                   -> no model calls at all
+    model_provider: Literal[
+        "auto", "anthropic", "openai", "claude-code", "codex", "host", "none"
+    ] = "auto"
     model: str | None = Field(
         default=None, description="Model for the provider; unset means the provider's default."
     )
@@ -69,9 +75,15 @@ class ApexConfig(BaseModel):
 
     @classmethod
     def discover(cls, start: Path) -> tuple["ApexConfig", Path | None]:
-        """Walk up from `start` looking for apex.toml; fall back to defaults."""
+        """Walk up from `start` looking for apex.toml; fall back to defaults. The environment
+        variable APEX_MODEL_PROVIDER overrides `model_provider` (for CI: `none`)."""
+        found: tuple[ApexConfig, Path | None] = (cls(), None)
         for d in [start, *start.parents]:
             candidate = d / CONFIG_FILENAME
             if candidate.is_file():
-                return cls.load(candidate), candidate
-        return cls(), None
+                found = (cls.load(candidate), candidate)
+                break
+        config, path = found
+        if env := os.environ.get(PROVIDER_ENV):
+            config = cls.model_validate({**config.model_dump(), "model_provider": env})
+        return config, path

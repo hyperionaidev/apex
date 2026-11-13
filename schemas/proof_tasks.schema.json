@@ -1,0 +1,91 @@
+{
+  "$defs": {
+    "ProofTask": {
+      "description": "An open theorem for the coding agent to prove.",
+      "properties": {
+        "commands": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Commands",
+          "type": "array"
+        },
+        "goal": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Goal"
+        },
+        "line": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Line"
+        },
+        "property_id": {
+          "title": "Property Id",
+          "type": "string"
+        },
+        "spec_file": {
+          "title": "Spec File",
+          "type": "string"
+        },
+        "statement": {
+          "title": "Statement",
+          "type": "string"
+        },
+        "strategy": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Strategy",
+          "type": "array"
+        },
+        "unfold": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Unfold",
+          "type": "array"
+        }
+      },
+      "required": [
+        "property_id",
+        "statement",
+        "spec_file"
+      ],
+      "title": "ProofTask",
+      "type": "object"
+    }
+  },
+  "properties": {
+    "target": {
+      "title": "Target",
+      "type": "string"
+    },
+    "tasks": {
+      "items": {
+        "$ref": "#/$defs/ProofTask"
+      },
+      "title": "Tasks",
+      "type": "array"
+    }
+  },
+  "required": [
+    "target"
+  ],
+  "title": "ProofTasks",
+  "type": "object"
+}

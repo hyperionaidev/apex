@@ -282,7 +282,9 @@ def build_eval_file(model: LeanModel, inputs: list[tuple[Any, ...]]) -> str:
         chunk = ",\n    ".join(calls[i : i + _CHUNK])
         evals.append(f'#eval IO.println ("{_MARK}\\n" ++ "\\n".intercalate [\n    {chunk}])')
     return (
-        f"import Apex.Prelude\nset_option autoImplicit false\n\nnamespace {model.namespace}\n\n"
+        "import Apex.Prelude\n"
+        + "".join(f"import {m}\n" for m in model.imports)
+        + f"set_option autoImplicit false\n\nnamespace {model.namespace}\n\n"
         f"{model.text}\n" + "\n\n".join(evals) + f"\n\nend {model.namespace}\n"
     )
 

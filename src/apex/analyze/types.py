@@ -72,6 +72,10 @@ class PyType:
         match self.kind:
             case "int" | "bool" | "float" | "str":
                 return self.kind
+            case "unknown":
+                return "?"
+            case "none":
+                return "None"
             case "date" | "datetime":
                 return f"datetime.{self.kind}"
             case "list":

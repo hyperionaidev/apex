@@ -43,6 +43,7 @@ def tiers(defs: list[str], decl: SpecDecl, model: str = "") -> list[str]:
         for v in var.split():
             out.append(f"by induction {v} <;> simp_all [{d}]")
             out.append(f"by induction {v} <;> simp_all [{d}] <;> omega")
+            out.append(f"by induction {v} <;> simp_all [{d}] <;> split <;> omega")
     return out
 
 

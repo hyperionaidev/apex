@@ -64,6 +64,18 @@ def _is_not_none(e: ast.expr, name: str) -> bool:
     )
 
 
+def _is_none(e: ast.expr, name: str) -> bool:
+    return (
+        isinstance(e, ast.Compare)
+        and isinstance(e.left, ast.Name)
+        and e.left.id == name
+        and len(e.ops) == 1
+        and isinstance(e.ops[0], ast.Is)
+        and isinstance(e.comparators[0], ast.Constant)
+        and e.comparators[0].value is None
+    )
+
+
 class _Subst(ast.NodeTransformer):
     def __init__(self, name: str, replacement: ast.expr) -> None:
         self.name, self.replacement = name, replacement
@@ -119,6 +131,20 @@ def draft_statement(
     call_text = f"({fn}{''.join(' ' + lean_ident(n) for n in names)})"
 
     premises = list(hint.premises)
+    conclusion_expr = hint.conclusion
+    # `r is None or P(r)` says: whenever there is a result, P holds of it.
+    if (
+        sig.returns.kind == "option"
+        and isinstance(conclusion_expr, ast.BoolOp)
+        and isinstance(conclusion_expr.op, ast.Or)
+        and _is_none(conclusion_expr.values[0], hint.result)
+    ):
+        rest = conclusion_expr.values[1:]
+        not_none = ast.Compare(
+            ast.Name(hint.result, ast.Load()), [ast.IsNot()], [ast.Constant(None)]
+        )
+        premises.append(not_none)
+        conclusion_expr = rest[0] if len(rest) == 1 else ast.BoolOp(ast.Or(), rest)
     value = ""
     unwrap = sig.returns.kind == "option" and any(_is_not_none(p, hint.result) for p in premises)
     if unwrap:
@@ -131,7 +157,7 @@ def draft_statement(
 
     # Bind only the parameters the claim is about; a precondition comes along only when the
     # claim mentions everything it constrains (`sum_list([]) == 0` needs no `xs`, no `lo <= hi`).
-    used = set().union(*(_names(e) for e in [*premises, hint.conclusion]))
+    used = set().union(*(_names(e) for e in [*premises, conclusion_expr]))
     if hint.result in used or unwrap:
         used |= set(names)
     preconditions = [c for c in preconditions if _names(c) & set(names) <= used]
@@ -140,7 +166,7 @@ def draft_statement(
         for p in [*preconditions, *premises]:
             p = ast.fix_missing_locations(_Subst(hint.result, replacement).visit(copy.deepcopy(p)))
             hyps.append(f"({_fresh('h', taken)} : {_bare(tr.translate(p, env))})")
-        concl = _Subst(hint.result, replacement).visit(copy.deepcopy(hint.conclusion))
+        concl = _Subst(hint.result, replacement).visit(copy.deepcopy(conclusion_expr))
         conclusion = _bare(tr.translate(ast.fix_missing_locations(concl), env))
     except TranslationError as e:
         raise DraftError(f"{pid}: the hint is outside the Lean subset: {e}") from e

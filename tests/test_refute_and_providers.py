@@ -240,3 +240,28 @@ def test_proposal_schema_is_exported(tmp_path: Path) -> None:
     assert {"proposal_set.schema.json", "refute_result.schema.json"} <= names
     schema = json.loads((tmp_path / "proposal_set.schema.json").read_text())
     assert "properties" in schema["properties"]
+
+
+def test_auto_prefers_an_installed_agent_cli(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from apex.llm import providers
+
+    _fake_cli(tmp_path, "claude", "print('{}')\n", monkeypatch)
+
+    assert ApexConfig().model_provider == "auto"  # an agent is assumed by default
+    assert providers.resolve_provider(ApexConfig()) == "none"  # none on this test machine
+    with pytest.raises(ProviderError, match="auto"):
+        providers.get_provider(ApexConfig())
+    monkeypatch.setattr(
+        providers, "available_agent_clis", lambda: {"claude-code": None, "codex": "/bin/codex"}
+    )
+    monkeypatch.setattr(providers, "api_keys_present", lambda: {"anthropic": True})
+    assert providers.resolve_provider(ApexConfig()) == "codex"  # CLIs before API keys
+    monkeypatch.setattr(
+        providers, "available_agent_clis", lambda: {"claude-code": "/bin/claude", "codex": None}
+    )
+    assert providers.resolve_provider(ApexConfig()) == "claude-code"
+    assert providers.resolve_provider(ApexConfig(model_provider="none")) == "none"
+    # A model name belongs to an explicitly chosen provider, not to whatever auto finds.
+    assert providers.get_provider(ApexConfig(model="x")).name == "claude-code"

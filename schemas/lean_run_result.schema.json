@@ -1,0 +1,77 @@
+{
+  "$defs": {
+    "LeanNote": {
+      "properties": {
+        "column": {
+          "title": "Column",
+          "type": "integer"
+        },
+        "goal": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Goal"
+        },
+        "line": {
+          "title": "Line",
+          "type": "integer"
+        },
+        "message": {
+          "title": "Message",
+          "type": "string"
+        },
+        "severity": {
+          "enum": [
+            "error",
+            "warning",
+            "information"
+          ],
+          "title": "Severity",
+          "type": "string"
+        }
+      },
+      "required": [
+        "severity",
+        "line",
+        "column",
+        "message"
+      ],
+      "title": "LeanNote",
+      "type": "object"
+    }
+  },
+  "properties": {
+    "messages": {
+      "items": {
+        "$ref": "#/$defs/LeanNote"
+      },
+      "title": "Messages",
+      "type": "array"
+    },
+    "note": {
+      "default": "Exploration only, never a verdict: write the proof into the spec file and run `apex verify`.",
+      "title": "Note",
+      "type": "string"
+    },
+    "ok": {
+      "title": "Ok",
+      "type": "boolean"
+    },
+    "target": {
+      "title": "Target",
+      "type": "string"
+    }
+  },
+  "required": [
+    "target",
+    "ok"
+  ],
+  "title": "LeanRunResult",
+  "type": "object"
+}

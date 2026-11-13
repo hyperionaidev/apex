@@ -40,8 +40,12 @@ export function clamp(x: number, lo: number, hi: number): number { ... }
   is a safe integer. Report them as exactly that; never as `proven`. `bigint` code can be
   `proven`.
 - **Refused constructs (for Lean):** `==`, bitwise operators, `this`, classes, `try`, `switch`,
-  strings, floats (a bare `/`), indexing, `while`, early returns in loops. The gap names the line; many
-  fixes are small rewrites (`for (const x of xs)` with an accumulator, `Math.floor(a / b)`).
+  strings, floats (a bare `/`), array indexing `xs[i]` (out of range JS gives `undefined`, which
+  the model cannot express), testing an array's truthiness (always true in JS). The gap names the
+  line; many fixes are small rewrites (`for (const x of xs)`, `Math.floor(a / b)`).
+- **Loops:** `for ... of`, counted `for` loops, `while`, and `return` / `break` / `continue`
+  inside them are modelled as in Python (see LEAN_SUBSET.md); a `while` loop needs a termination
+  measure Lean accepts (`apex lean termination`). A leading `if (c) throw ...` is a precondition.
 - **Fuzzing:** `apex fuzz <target> --engine jazzer` (coverage-guided; `apex init --js`) or the
   default Hypothesis engine.
 - **Not yet for JS:** CrossHair and TLA+.

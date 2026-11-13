@@ -22,16 +22,12 @@ FIXTURES = Path(__file__).resolve().parent / "fixtures" / "tlc"
 
 LOOPS = '''
 def isqrt(n: int) -> int:
-    """pre: 0 <= n <= 10**12
+    """pre: 0 <= n <= 10**6
     post: __return__ * __return__ <= n < (__return__ + 1) * (__return__ + 1)"""
-    lo, hi = 0, n + 1
-    while hi - lo > 1:
-        mid = (lo + hi) // 2
-        if mid * mid <= n:
-            lo = mid
-        else:
-            hi = mid
-    return lo
+    r = 0
+    while (r + 1) * (r + 1) <= n:
+        r += 1
+    return r
 
 
 def checksum(n: int) -> int:
@@ -59,7 +55,8 @@ def loops(tmp_path: Path) -> Workspace:
 def test_a_clean_campaign_makes_an_out_of_scope_property_fuzzed(loops: Workspace) -> None:
     target = str(loops.root / "loops.py::isqrt")
     before = verify([target], loops, write_report=False).functions[0].properties[0]
-    assert before.verdict is Verdict.OUT_OF_SCOPE  # a while loop: Lean has no model
+    # Lean cannot show this while loop terminates without nonlinear arithmetic: no model.
+    assert before.verdict is Verdict.OUT_OF_SCOPE
     (e,) = fuzz_target(target, loops, budget_s=2).properties
     assert e.found is None and e.executions > 0 and e.engine == "hypothesis"
     p = verify([target], loops, write_report=False).functions[0].properties[0]
@@ -73,7 +70,7 @@ def test_evidence_lapses_when_the_function_changes(loops: Workspace) -> None:
     target = str(loops.root / "loops.py::isqrt")
     fuzz_target(target, loops, budget_s=1)
     src = loops.root / "loops.py"
-    src.write_text(src.read_text().replace("lo, hi = 0, n + 1", "lo, hi = 0, n + 2"))
+    src.write_text(src.read_text().replace("r = 0\n", "r = 0 * 1\n"))
     p = verify([target], loops, write_report=False).functions[0].properties[0]
     assert p.verdict is Verdict.OUT_OF_SCOPE
 

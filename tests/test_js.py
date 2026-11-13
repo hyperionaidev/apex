@@ -62,14 +62,18 @@ def test_constructs_that_would_change_meaning_are_refused(tmp_path: Path) -> Non
         export function bits(a: number): number { return a | 1; }
         export function same(xs: number[], ys: number[]): boolean { return xs === ys; }
         export function spin(n: number): number { let i = 0; while (i < n) { i++; } return i; }
+        export function at(xs: number[]): number { return xs[0]; }
+        export function truthy(xs: number[]): number { return xs ? 1 : 0; }
         """,
     )
     assert _gap(path, "div").reason_code is ReasonCode.FLOAT_SEMANTICS
     assert "loose equality" in str(_gap(path, "loose"))
     assert "32-bit" in str(_gap(path, "bits"))
     assert "identity" in str(_gap(path, "same"))  # === on arrays compares references in JS
-    spin = _gap(path, "spin")
-    assert spin.reason_code is ReasonCode.NONTERMINATION and spin.line == 6
+    # A while loop is a helper defined by well-founded recursion (Lean checks it terminates).
+    assert "if h' : (i < n) then" in _model(path, "spin")
+    assert "undefined" in str(_gap(path, "at"))  # out of range, JS does not fail
+    assert "always truthy" in str(_gap(path, "truthy"))
 
 
 def test_counted_for_loops_and_array_methods_lower_to_the_subset(tmp_path: Path) -> None:

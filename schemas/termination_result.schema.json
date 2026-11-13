@@ -1,0 +1,91 @@
+{
+  "$defs": {
+    "LeanError": {
+      "additionalProperties": false,
+      "description": "One Lean error on a rejected proof, positioned in the file the author edits.",
+      "properties": {
+        "column": {
+          "title": "Column",
+          "type": "integer"
+        },
+        "file": {
+          "title": "File",
+          "type": "string"
+        },
+        "goal": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Goal"
+        },
+        "line": {
+          "title": "Line",
+          "type": "integer"
+        },
+        "message": {
+          "title": "Message",
+          "type": "string"
+        }
+      },
+      "required": [
+        "file",
+        "line",
+        "column",
+        "message"
+      ],
+      "title": "LeanError",
+      "type": "object"
+    }
+  },
+  "properties": {
+    "accepted": {
+      "title": "Accepted",
+      "type": "boolean"
+    },
+    "definition": {
+      "title": "Definition",
+      "type": "string"
+    },
+    "errors": {
+      "items": {
+        "$ref": "#/$defs/LeanError"
+      },
+      "title": "Errors",
+      "type": "array"
+    },
+    "measure": {
+      "title": "Measure",
+      "type": "string"
+    },
+    "model_compiles": {
+      "default": false,
+      "title": "Model Compiles",
+      "type": "boolean"
+    },
+    "needs_measure": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Needs Measure",
+      "type": "array"
+    },
+    "target": {
+      "title": "Target",
+      "type": "string"
+    }
+  },
+  "required": [
+    "target",
+    "definition",
+    "measure",
+    "accepted"
+  ],
+  "title": "TerminationResult",
+  "type": "object"
+}

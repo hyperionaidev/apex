@@ -744,17 +744,15 @@ expected = { P1 = "fuzzed" }
 [[case]]
 target = "loops.py::fact_rec"
 fuzz = 3
-category = "out_of_scope"
+category = "known_good"
 inputs = ["docstring"]
-reason = "NONTERMINATION"
 expected = { P1 = "fuzzed" }
 
 [[case]]
 target = "loops.py::binary_search"
 fuzz = 3
-category = "out_of_scope"
+category = "known_good"
 inputs = ["docstring"]
-reason = "UNSUPPORTED_CONSTRUCT"
 expected = { P1 = "fuzzed", P2 = "fuzzed" }
 
 [[case]]
@@ -783,9 +781,11 @@ category = "out_of_scope"
 reason = "IMPURE_IO"
 
 # ---- M5 corpus expansion: AI-generated (unedited agent output; see ai_*.py) ----
-# All ten are correct as far as a careful reading shows, so nothing may be refuted. Idiomatic
-# agent code mostly falls outside the subset: there refutation and fuzzing (M6) speak, and a
-# clean campaign earns `fuzzed`, never `proven`.
+# All ten are correct as far as a careful reading shows, so nothing may be refuted. Since phase 9
+# nine of the ten have a Lean model (early returns, indexing, while loops, truthiness, None as a
+# running value). The tactic tiers prove is_balanced's P1; the rest need a proof from the coding
+# agent (proof tasks), which the eval does not run, so they are fuzzed. Only digit_sum
+# (`while n:`, divergent for negative n) has no model.
 
 [[case]]
 target = "ai_claude.py::clamp"
@@ -805,7 +805,6 @@ target = "ai_claude.py::dedupe_consecutive"
 fuzz = 3
 category = "ai_generated"
 inputs = ["english"]
-reason = "UNSUPPORTED_CONSTRUCT"
 expected = { P1 = "fuzzed", P2 = "fuzzed" }
 
 [[case]]
@@ -813,10 +812,10 @@ target = "ai_claude.py::is_balanced"
 fuzz = 3
 category = "ai_generated"
 inputs = ["english"]
-reason = "UNSUPPORTED_CONSTRUCT"
-expected = { P1 = "fuzzed", P2 = "fuzzed" }
+expected = { P1 = "holds", P2 = "fuzzed" }
 
-# Two gaps (a `raise` and a `while`); the while loop is the one reported.
+# The guard clause is a precondition, but `while n:` diverges for negative n, and the loop's own
+# definition cannot use the precondition: no termination measure exists.
 [[case]]
 target = "ai_claude.py::digit_sum"
 fuzz = 3
@@ -830,7 +829,6 @@ target = "ai_codex.py::count_between"
 fuzz = 3
 category = "ai_generated"
 inputs = ["english"]
-reason = "UNSUPPORTED_CONSTRUCT"
 expected = { P1 = "fuzzed", P2 = "fuzzed" }
 
 [[case]]
@@ -838,7 +836,6 @@ target = "ai_codex.py::run_length_encode"
 fuzz = 3
 category = "ai_generated"
 inputs = ["english"]
-reason = "UNSUPPORTED_CONSTRUCT"
 expected = { P1 = "fuzzed", P2 = "fuzzed", P3 = "fuzzed" }
 
 [[case]]
@@ -846,7 +843,6 @@ target = "ai_codex.py::second_largest"
 fuzz = 3
 category = "ai_generated"
 inputs = ["english"]
-reason = "UNSUPPORTED_CONSTRUCT"
 expected = { P1 = "fuzzed", P2 = "fuzzed" }
 
 # `i = j = 0` (chained assignment) comes before the while loop.
@@ -855,7 +851,6 @@ target = "ai_codex.py::merge_sorted"
 fuzz = 3
 category = "ai_generated"
 inputs = ["english"]
-reason = "UNSUPPORTED_CONSTRUCT"
 expected = { P1 = "fuzzed", P2 = "fuzzed" }
 
 [[case]]
@@ -876,7 +871,7 @@ fuzz = 600
 fuzz_executions = 30000
 category = "planted_bug"
 inputs = ["docstring"]
-reason = "NONTERMINATION"
+reason = "UNSUPPORTED_CONSTRUCT"
 expected = { P1 = "refuted" }
 
 # Concurrent code, checked against hand-written TLA+ bundles (evals/corpus/tla/<function>/).
@@ -1097,7 +1092,6 @@ fuzz = 60
 fuzz_engine = "jazzer"
 category = "planted_bug"
 inputs = ["docstring"]
-reason = "NONTERMINATION"
 expected = { P1 = "refuted" }
 
 [[case]]
@@ -1163,9 +1157,8 @@ reason = "UNSUPPORTED_CONSTRUCT"
 [[case]]
 target = "jsimpure.ts::isqrt"
 fuzz = 3
-category = "out_of_scope"
+category = "known_good"
 inputs = ["docstring"]
-reason = "NONTERMINATION"
 expected = { P1 = "fuzzed" }
 
 # Agent-written TypeScript (ai_ts_*.ts, unedited). All six are correct as far as a careful

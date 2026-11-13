@@ -87,8 +87,9 @@
       "title": "Model"
     },
     "model_provider": {
-      "default": "none",
+      "default": "auto",
       "enum": [
+        "auto",
         "anthropic",
         "openai",
         "claude-code",

@@ -20,7 +20,8 @@ allowed-tools: Bash(apex:*) Bash(uv:*) Read
 
 Apex proves or refutes properties of pure Python, JavaScript and TypeScript functions with
 Lean 4, and gathers evidence (fuzzing, TLA+) where Lean cannot reach. You propose (formal hints,
-proofs, specs); Apex checks; only Apex's verdicts count. Targets look like `path.py::function`
+proofs, termination measures, specs); Apex checks; only Apex's verdicts count. Where Apex's own
+tactics stop, writing the Lean proof is your job, with Apex showing you the goals. Targets look like `path.py::function`
 or `path.ts::function`. For JS/TS, read [references/JAVASCRIPT.md](references/JAVASCRIPT.md)
 first: hints are JavaScript expressions there.
 
@@ -47,16 +48,20 @@ first: hints are JavaScript expressions there.
 5. **Get approval.** Ask the user to run `apex review <target> --approve <ids>` in their own
    terminal. It requires an interactive confirmation, so you cannot run it for them. If no person
    is present, continue: results will be `proven_unreviewed`.
-6. **Prove.** `apex prove <target> --tactics-only` (`apex_prove`) first. For what remains, write
-   the proof in the spec file as in [references/PROOF_PLAYBOOK.md](references/PROOF_PLAYBOOK.md),
-   run `apex verify <target>` (`apex_verify`), read the `lean_errors` (line, goal state) and retry
-   up to the configured budget.
+6. **Prove.** `apex prove <target> --tactics-only` (`apex_prove`) first. Every theorem it leaves
+   open comes back as a proof task (goal, definitions to unfold, strategy): **you write those
+   proofs**, as in [references/PROOF_PLAYBOOK.md](references/PROOF_PLAYBOOK.md). Explore with
+   `apex lean goals <target> <ID> --tactics '...'` (`apex_lean_goals`) and `apex lean run`
+   (`apex_lean_run`), put the proof in the spec in place of `sorry`, run `apex verify <target>`
+   (`apex_verify`), read the `lean_errors` (line, goal state) and retry up to the configured
+   budget. Do this before fuzzing. A `NONTERMINATION` gap on a `while` loop or recursion means
+   Lean needs a termination measure: give one with `apex lean termination` (`apex_lean_termination`).
 7. **Refute.** `apex refute <target>` (`apex_refute`). A counterexample ends that property: fix the
    code or the intent, never the theorem. `apex suggest <target>` writes a regression test that
    replays it.
-8. **Fuzz what Lean left open.** For properties still `unproven` or `out_of_scope` on a pure
-   function, `apex fuzz <target> --seconds 30` (`apex_fuzz`) runs a recorded campaign; `verify`
-   then reports `fuzzed` (evidence, not proof) or `refuted`.
+8. **Fuzz what Lean left open.** For properties still `unproven` after your proof attempts, or
+   `out_of_scope`, on a pure function, `apex fuzz <target> --seconds 30` (`apex_fuzz`) runs a
+   recorded campaign; `verify` then reports `fuzzed` (evidence, not proof) or `refuted`.
 9. **Report.** Present Apex's report table verbatim (`apex verify <target> --markdown`, or the
    table `scripts/apex_run.py` prints), then summarise in one paragraph. What each verdict means
    and how to word it: [references/VERDICTS.md](references/VERDICTS.md); gap reason codes:
@@ -73,5 +78,6 @@ first: hints are JavaScript expressions there.
   project (schema, forms, tests, docs) or the user.
 - Never weaken or reword a theorem statement to make a proof pass without new approval.
 - Never write a formal hint that describes what the code does instead of what the intent says.
-- Never use `sorry`, `admit`, `axiom`, `unsafe` or `native_decide`; the axiom audit rejects them.
+- Never use `sorry`, `admit`, `axiom`, `unsafe` or `native_decide` in the spec; the axiom audit
+  rejects them. (`sorry` is fine in `apex lean goals` / `apex lean run` while exploring.)
 - Present Apex's report table verbatim, then summarise in one paragraph.

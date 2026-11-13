@@ -237,14 +237,19 @@ def _tla_check() -> Check:
 def _llm_check(cwd: Path) -> Check:
     """Which ways of reaching a model are available. Optional: every verb works without one."""
     from apex.core.config import ApexConfig
-    from apex.llm.providers import api_keys_present, available_agent_clis
+    from apex.llm.providers import api_keys_present, auto_provider, available_agent_clis
 
     config, _ = ApexConfig.discover(cwd.resolve())
     found = [n for n, path in available_agent_clis().items() if path]
     found += [f"{n} (API key)" for n, ok in api_keys_present().items() if ok]
     configured = config.model_provider
+    if configured == "auto":
+        configured = f"auto -> {auto_provider()}"
     detail = f"configured: {configured}; available: {', '.join(found) or 'none'}"
-    usable = configured in ("none", "host") or any(f.startswith(configured) for f in found)
+    name = config.model_provider if config.model_provider != "auto" else auto_provider()
+    usable = name in ("none", "host") or any(f.startswith(name) for f in found)
+    if config.model_provider == "auto" and name == "none":
+        usable = False  # works, but without a model: say so
     return Check(name="llm_provider", status="ok" if usable else "warn", detail=detail)
 
 

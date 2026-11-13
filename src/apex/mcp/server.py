@@ -30,20 +30,29 @@ from apex.fidelity.fuzz import FuzzResult
 from apex.fidelity.refute import RefuteResult
 from apex.intent.proposals import ProposalCheck, ProposalSet
 from apex.intent.references import ReferenceResult
+from apex.prove.explore import LeanGoals, LeanRunResult, ProofTasks, TerminationResult
 from apex.report.explain import AdviceList, advise
 from apex.survey import Survey
 from apex.theorems.decisions import Decision
 from apex.tla.check import TlaCheckResult
 
 INSTRUCTIONS = """\
-Apex formally verifies pure Python functions with Lean 4. Targets look like `path.py::function`.
+Apex formally verifies Python, JavaScript and TypeScript functions: Lean 4 proofs, plus fuzzing
+and TLA+ evidence where proofs do not reach. Targets look like `path.py::function`.
 Verdicts come only from Apex: report them verbatim and never describe anything as proven unless
 the verdict is `proven`. `proven_unreviewed` means Lean proved a statement no person has approved;
 ask the user to run `apex review <target> --approve <ids>` in their own terminal (no tool can
-approve). A `refuted` verdict carries an input on which the real Python breaks the property: fix
+approve). A `refuted` verdict carries an input on which the real code breaks the property: fix
 the code or the intent, never the theorem. Typical loop: apex_analyze -> apex_intent_submit (if
-items need formal hints) -> apex_scaffold -> apex_prove -> write remaining proofs into the spec and
-apex_verify -> apex_refute -> apex_suggest.
+items need formal hints) -> apex_scaffold -> apex_prove -> apex_refute -> apex_suggest.
+
+Proofs are your job where Apex's tactics stop. apex_prove (and apex_lean_tasks) returns a proof
+task per open theorem: the goal, the definitions to unfold, a strategy. Write the proof: explore
+with apex_lean_goals (goals left after your tactics) and apex_lean_run (#check, exact?, simp?
+against the model), put it in the spec file in place of `sorry` (helper lemmas named
+`<ID>_<name>` are allowed), and call apex_verify; read `lean_errors` and retry within the budget.
+Only then fall back to apex_fuzz. A NONTERMINATION gap on a while loop or recursion means Lean
+needs a measure: give one with apex_lean_termination.
 
 On an existing project, start with apex_survey: it lists what Apex cannot read from the code
 (types of untyped functions, the values a field takes, which numbers are money, time zones). Find
@@ -119,7 +128,9 @@ def build_server() -> MCPServer:
     @server.tool()
     def apex_prove(target: str) -> ProveResult:
         """Run the tactic tiers (decide, omega, simp, induction, ...) on every open theorem in
-        the spec and write the proofs that close. No model is involved. Follow with apex_verify."""
+        the spec and write the proofs that close. No model is involved. For each theorem still
+        open, `tasks` says what you need to write its proof yourself (goal, definitions to
+        unfold, strategy). Follow with apex_verify."""
         from apex import pipeline
 
         return _run(lambda: pipeline.prove_tactics(target, _ws()))
@@ -150,6 +161,67 @@ def build_server() -> MCPServer:
             return pipeline.verify(targets, ws)
 
         return _run(go)
+
+    @server.tool()
+    def apex_lean_tasks(target: str) -> ProofTasks:
+        """A proof task per theorem still open in the spec: the statement, its line, the goal
+        after `intros`, the definitions to unfold, and a strategy read off the model. You write
+        these proofs: explore with apex_lean_goals / apex_lean_run, put the proof in the spec,
+        then apex_verify."""
+        from apex import pipeline
+        from apex.lean.project import LeanProject
+
+        def go() -> ProofTasks:
+            ws = _ws()
+            a = pipeline._analyze(target, ws)
+            if a.model is None:
+                raise pipeline.ApexToolError(
+                    f"{target} has no Lean model: {a.gap.explanation if a.gap else ''}"
+                )
+            path = ws.spec_path(a.info)
+            spec = pipeline.load_spec(path)
+            open_ = [d for d in spec.properties if not d.has_proof]
+            tasks = pipeline.proof_tasks(a, spec, open_, path, LeanProject.locate())
+            return ProofTasks(target=target, tasks=tasks)
+
+        return _run(go)
+
+    @server.tool()
+    def apex_lean_goals(target: str, property_id: str, tactics: str | None = None) -> LeanGoals:
+        """The goals a spec theorem has left after a tactic script (default `intros`); errors
+        come back with their goal state. `sorry` is allowed here to skip a branch. Build the
+        proof step by step, then write it into the spec and call apex_verify. Not a verdict."""
+        from apex import pipeline
+
+        return _run(lambda: pipeline.lean_goals(target, _ws(), property_id, tactics))
+
+    @server.tool()
+    def apex_lean_run(target: str, code: str) -> LeanRunResult:
+        """Run Lean commands after the model and the spec's helper lemmas: `#check name`,
+        `#print f.loop1`, `example : ... := by exact?` / `simp?` / `omega`, scratch lemmas.
+        Leading `import Mathlib....` lines are allowed. Not a verdict."""
+        from apex import pipeline
+
+        return _run(lambda: pipeline.lean_run(target, _ws(), code))
+
+    @server.tool()
+    def apex_lean_termination(
+        target: str,
+        definition: str,
+        measure: str,
+        by: str | None = None,
+        imports: list[str] | None = None,
+    ) -> TerminationResult:
+        """For a NONTERMINATION gap: a measure for a while helper (`f.loop1`) or recursive
+        function, as a Lean term of type Nat over its parameters that decreases on every
+        iteration (`by`: the decreasing_by tactic, default omega). Lean checks it; an accepted
+        measure is recorded and the function gets a model. A wrong one comes back with the goal
+        Lean could not prove."""
+        from apex import pipeline
+
+        return _run(
+            lambda: pipeline.set_termination(target, _ws(), definition, measure, by, imports)
+        )
 
     @server.tool()
     def apex_refute(target: str, properties: list[str] | None = None) -> RefuteResult:
@@ -198,7 +270,9 @@ def build_server() -> MCPServer:
 
         def go() -> Report:
             ws = _ws()
-            if ws.config.model_provider in ("none", "host"):
+            from apex.llm.providers import resolve_provider
+
+            if resolve_provider(ws.config) in ("none", "host"):
                 raise pipeline.ApexToolError(
                     "apex_check is engine mode and model_provider is "
                     f"`{ws.config.model_provider}`; drive the pipeline with the other tools"

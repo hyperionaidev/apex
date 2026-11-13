@@ -8,9 +8,9 @@ them for the last report.
 | `UNSUPPORTED_CONSTRUCT` | A construct outside the Lean subset (see LEAN_SUBSET.md), or the generated model failed | Rewrite with the subset, or verify the extracted pure core |
 | `IMPURE_IO` | I/O, globals, randomness, mutation of arguments | Move the computation into a pure function and verify that |
 | `FLOAT_SEMANTICS` | Floats or true division | Use integers (fixed point), or a float-aware tool |
-| `NONTERMINATION` | Lean cannot see that a loop or recursion ends | Use `for` over a list or `range()` with an accumulator; recursion is not supported yet |
-| `BUDGET_EXHAUSTED` | No proof found yet, or Lean timed out | Run `apex prove`; write the proof in the spec (PROOF_PLAYBOOK.md) and `apex verify` |
-| `PROOF_REJECTED` | Lean rejected the proof, or a disallowed axiom / token | Read `lean_errors` (line, goal) and fix the proof |
+| `NONTERMINATION` | Lean could not show a `while` loop or recursion ends with any measure Apex tried | Give a measure: `apex lean termination <target> <def> --measure '<Nat term>'` (PROOF_PLAYBOOK.md); or make the loop condition imply progress, or use `for` over a list or `range()` |
+| `BUDGET_EXHAUSTED` | No proof found yet, or Lean timed out | Run `apex prove`; then write the proof yourself from its proof task (`apex lean tasks`, `apex lean goals`; PROOF_PLAYBOOK.md) and `apex verify` |
+| `PROOF_REJECTED` | Lean rejected the proof, or a disallowed axiom / token | Read `lean_errors` (line, goal); `apex lean goals <target> <ID> --tactics '...'` shows where it stops; fix the proof |
 | `NO_STATEMENT` | A property has a hint but no theorem yet | `apex scaffold <target>` appends the drafted theorem |
 | `SPEC_AMBIGUOUS` | Text-only intent, confidence below the floor, or no intent at all | Write a formal hint (INTENT.md) and `apex intent submit` |
 | `SPEC_CONFLICT` | Intent sources disagree | Ask the user which source is right; fix the other |
