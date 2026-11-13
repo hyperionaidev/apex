@@ -89,6 +89,18 @@
           "title": "Hint",
           "type": "string"
         },
+        "inputs": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Inputs"
+        },
         "note": {
           "anyOf": [
             {
@@ -113,6 +125,13 @@
           "default": 0,
           "title": "Skipped",
           "type": "integer"
+        },
+        "time_zones": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Time Zones",
+          "type": "array"
         }
       },
       "required": [

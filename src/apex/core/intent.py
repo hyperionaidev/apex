@@ -30,8 +30,9 @@ class Signature(_Strict):
 
 
 class Source(_Strict):
-    type: Literal["docstring", "test", "spec", "source", "inferred"]
-    """`spec` is an English spec file; `inferred` is a model's reading of the code alone."""
+    type: Literal["docstring", "test", "spec", "source", "inferred", "reference"]
+    """`spec` is an English spec file; `inferred` is a model's reading of the code alone;
+    `reference` is a reference implementation or exact arithmetic (`apex reference add`)."""
     loc: str | None = None
 
 

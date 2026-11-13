@@ -15,14 +15,18 @@ from apex.core.outputs import (
     TlaDraftResult,
     ToolErrorOutput,
 )
+from apex.core.profile import Profile
 from apex.core.report import Report
 from apex.fidelity.fuzz import FuzzResult
 from apex.fidelity.refute import RefuteResult
 from apex.intent.proposals import ProposalCheck, ProposalSet
+from apex.intent.references import ReferenceResult, ReferenceSet
 from apex.lean.compiler import CompileResult
 from apex.pipeline import AnalyzeResult, ProveResult, ScaffoldResult
 from apex.report.explain import AdviceList
 from apex.skill.install import SkillInstallResult
+from apex.survey import Survey
+from apex.theorems.decisions import Decision
 from apex.tla.check import TlaCheckResult
 
 CONTRACTS: dict[str, type[BaseModel]] = {
@@ -47,6 +51,11 @@ CONTRACTS: dict[str, type[BaseModel]] = {
     "fuzz_result": FuzzResult,
     "tla_check_result": TlaCheckResult,
     "tla_draft_result": TlaDraftResult,
+    "survey": Survey,
+    "profile": Profile,
+    "reference_result": ReferenceResult,
+    "reference_set": ReferenceSet,
+    "decision": Decision,
 }
 
 # Which schema each command's `--json` output follows (on exit 3, always `tool_error`).
@@ -72,6 +81,10 @@ CLI_OUTPUTS: dict[str, str] = {
     "dev compile": "lean_compile_result",
     "mcp install": "install_result",
     "skill install": "install_result",
+    "survey": "survey",
+    "reference add": "reference_result",
+    "reference list": "reference_set",
+    "decide": "decision",
 }
 
 

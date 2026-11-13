@@ -27,11 +27,21 @@ r == len([x for x in xs if x == v])
 my_abs(-x) == r                 # other functions in the same module may be called
 ```
 
-Allowed: integer and boolean literals and `None`; `+ - * // %`, `**` with a literal exponent
-up to 64; comparisons (chains too); `and`, `or`, `not`; `is None`, `is not None`, `in`; list and
-tuple literals, indexing and slices; conditional expressions; comprehensions and generators;
-`all`, `any`, `len`, `abs`, `min`, `max`, `sum`, `range`; functions defined in the same module.
-Nothing else: no attribute access, strings, floats or other calls.
+Allowed: number, string and boolean literals and `None`; `+ - * / // %`, `**` with a literal
+exponent up to 64; comparisons (chains too); `and`, `or`, `not`; `is None`, `is not None`, `in`;
+list and tuple literals, indexing and slices; record fields (`inv.amount`, `e["kind"]`);
+conditional expressions; comprehensions and generators; `all`, `any`, `len`, `abs`, `min`,
+`max`, `sum`, `range`; functions defined in the same module; and these helpers:
+
+| Helper | Means |
+|---|---|
+| `apex_round(x)`, `apex_floor(x)`, `apex_ceil(x)`, `apex_trunc(x)` | JavaScript's `Math.round` (halves up), `Math.floor`, `Math.ceil`, `Math.trunc` (in JS hints, write `Math.round(x)` and so on) |
+| `apex_is_integer(x)` | `Number.isInteger(x)` |
+| `apex_close(a, b, tol)` | equal values, numbers within `tol` (element-wise in lists and records) |
+
+Nothing else: no method calls (put the logic in a same-module helper and call that). Only hints
+on int, bool, list, tuple and optional values become Lean theorems; hints on strings, floats,
+records and dates are checked on the real code (refutation, fuzzing).
 
 Write one claim per hint. A requirement on the inputs is a precondition (no `r`). When the result
 may be `None`, guard a claim about its value with `r is not None ->`.

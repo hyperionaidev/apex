@@ -53,6 +53,89 @@
       "title": "Counterexample",
       "type": "object"
     },
+    "DecisionView": {
+      "additionalProperties": false,
+      "description": "What the report shows on a property.",
+      "properties": {
+        "decided_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Decided At"
+        },
+        "decided_by": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Decided By"
+        },
+        "question": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Question"
+        },
+        "ruling_note": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ruling Note"
+        },
+        "status": {
+          "enum": [
+            "open",
+            "bug",
+            "intended",
+            "withdrawn",
+            "lapsed"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "when": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "When"
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "title": "DecisionView",
+      "type": "object"
+    },
     "FidelitySummary": {
       "additionalProperties": false,
       "properties": {
@@ -232,6 +315,18 @@
           "title": "Hint",
           "type": "string"
         },
+        "inputs": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Inputs"
+        },
         "note": {
           "anyOf": [
             {
@@ -256,6 +351,13 @@
           "default": 0,
           "title": "Skipped",
           "type": "integer"
+        },
+        "time_zones": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Time Zones",
+          "type": "array"
         }
       },
       "required": [
@@ -346,6 +448,13 @@
           },
           "title": "Constants",
           "type": "object"
+        },
+        "controls": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Controls",
+          "type": "array"
         },
         "depth": {
           "anyOf": [
@@ -501,6 +610,17 @@
           ],
           "default": null
         },
+        "decision": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DecisionView"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "fuzz": {
           "anyOf": [
             {
@@ -638,7 +758,10 @@
         "PROOF_REJECTED",
         "NO_STATEMENT",
         "SPEC_VIOLATION_NOT_REPRODUCED",
-        "MODEL_CHECK_FAILED"
+        "MODEL_CHECK_FAILED",
+        "CONTROL_FAILED",
+        "NEEDS_DECISION",
+        "WITHDRAWN"
       ],
       "title": "ReasonCode",
       "type": "string"

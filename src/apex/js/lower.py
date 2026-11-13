@@ -27,6 +27,7 @@ from dataclasses import dataclass, field
 
 from tree_sitter import Node
 
+from apex.analyze.types import RECORD_HOOK
 from apex.js.parse import JsFunction, JsModule, parse_type, text, walk
 from apex.translate.lean import REDUCE_HOOK, TDIV_HOOK, TMOD_HOOK, UNSUPPORTED_HOOK
 
@@ -59,6 +60,8 @@ class Lowered:
     """The numeric kinds the signature uses: "number" (float-backed) and/or "bigint"."""
     typed: bool = True
     """Every parameter and the result have a type (TypeScript or JSDoc)."""
+    constants: list[str] = field(default_factory=list)
+    """Module `const`s with a primitive value that the lowering inlined, in first-use order."""
 
 
 def _at[T: ast.AST](py: T, ts: Node | None) -> T:
@@ -121,13 +124,27 @@ def _arguments(names: list[ast.arg]) -> ast.arguments:
 # ---- types ------------------------------------------------------------------------------------
 
 
-def lower_type(node: Node | None, numeric: set[str]) -> ast.expr | None:
-    """A TS type as a Python annotation, or None when it has no counterpart in the subset."""
+def lower_type(
+    node: Node | None,
+    numeric: set[str],
+    types: dict[str, Node] | None = None,
+    _seen: frozenset[str] = frozenset(),
+) -> ast.expr | None:
+    """A TS type as a Python annotation, or None when it has no counterpart in the subset.
+
+    `types`: the module's named types (`type`, `interface`, JSDoc `@typedef`), resolved in place.
+    Object types become `__apex_record__(field=T, opt=NotRequired[T])`, string and number literal
+    unions `Literal[...]`, `Date` a `datetime`, `Record<string, T>` a `dict[str, T]`.
+    """
     if node is None:
         return None
+
+    def sub(n: Node | None) -> ast.expr | None:
+        return lower_type(n, numeric, types, _seen)
+
     t = node.type
     if t == "parenthesized_type" and node.named_children:
-        return lower_type(node.named_children[0], numeric)
+        return sub(node.named_children[0])
     if t in ("predefined_type", "type_identifier"):
         name = text(node)
         if name in ("number", "bigint"):
@@ -138,34 +155,111 @@ def lower_type(node: Node | None, numeric: set[str]) -> ast.expr | None:
             return _name(simple[name])
         if name in ("void", "undefined", "null"):
             return ast.Constant(None)
+        if name in ("any", "unknown", "object", "Object", "never"):
+            return None
+        if name == "Date":
+            return _name("datetime")
+        if types and name in types and name not in _seen:
+            return lower_type(types[name], numeric, types, _seen | {name})
         return _name(name if name.isidentifier() else "object")
     if t == "literal_type":
+        values = _literal_values([node])
+        if values is not None:
+            return _literal(values)
         return ast.Constant(None) if text(node) in ("null", "undefined") else None
     if t == "array_type" and node.named_children:
-        inner = lower_type(node.named_children[0], numeric)
+        inner = sub(node.named_children[0])
         return _generic("list", [inner]) if inner is not None else None
     if t == "readonly_type" and node.named_children:
-        return lower_type(node.named_children[-1], numeric)
+        return sub(node.named_children[-1])
     if t == "generic_type":
         name = text(node.child_by_field_name("name"))
         args = node.child_by_field_name("type_arguments")
-        if name in ("Array", "ReadonlyArray") and args is not None and args.named_children:
-            inner = lower_type(args.named_children[0], numeric)
+        targs = [c for c in args.named_children if c.type != "comment"] if args else []
+        if name in ("Array", "ReadonlyArray") and len(targs) == 1:
+            inner = sub(targs[0])
             return _generic("list", [inner]) if inner is not None else None
+        if name in ("Record", "Map") and len(targs) == 2:
+            key, value = sub(targs[0]), sub(targs[1])
+            if key is None or value is None or name == "Map":
+                return None
+            return _generic("dict", [key, value])
+        if name == "Readonly" and len(targs) == 1:
+            return sub(targs[0])
         return None
     if t == "tuple_type":
-        parts = [lower_type(c, numeric) for c in node.named_children]
+        parts = [sub(c) for c in node.named_children]
         if any(p is None for p in parts):
             return None
         return _generic("tuple", [p for p in parts if p is not None])
+    if t in ("object_type", "interface_body"):
+        return _object_type(node, sub)
     if t == "union_type":
         members = _union_members(node)
         rest = [m for m in members if text(m) not in ("null", "undefined")]
-        if len(rest) == 1 and len(members) > 1:
-            inner = lower_type(rest[0], numeric)
-            return ast.BinOp(inner, ast.BitOr(), ast.Constant(None)) if inner is not None else None
-        return None
+        nullable = len(rest) < len(members)
+        values = _literal_values(rest)
+        inner: ast.expr | None
+        if values is not None:
+            inner = _literal(values)
+        elif len(rest) == 1:
+            inner = sub(rest[0])
+        else:
+            return None
+        if inner is None:
+            return None
+        return ast.BinOp(inner, ast.BitOr(), ast.Constant(None)) if nullable else inner
     return None
+
+
+def _literal_values(members: list[Node]) -> list[str | int] | None:
+    """The values of a union of string / integer literal types, or None if it is not one."""
+    out: list[str | int] = []
+    for m in members:
+        if m.type != "literal_type" or not m.named_children:
+            return None
+        v = m.named_children[0]
+        raw = text(v)
+        if v.type == "string":
+            out.append(raw[1:-1])
+        elif (v.type == "number" and raw.lstrip("-").isdigit()) or (
+            v.type == "unary_expression" and raw.startswith("-") and raw[1:].isdigit()
+        ):
+            out.append(int(raw))
+        else:
+            return None
+    return out or None
+
+
+def _literal(values: list[str | int]) -> ast.expr:
+    elts: list[ast.expr] = [ast.Constant(v) for v in dict.fromkeys(values)]
+    sl: ast.expr = elts[0] if len(elts) == 1 else ast.Tuple(elts, ast.Load())
+    return ast.Subscript(_name("Literal"), sl, ast.Load())
+
+
+def _object_type(node: Node, sub) -> ast.expr | None:
+    keywords: list[ast.keyword] = []
+    for c in node.named_children:
+        if c.type == "comment":
+            continue
+        if c.type == "index_signature" and len(node.named_children) == 1:
+            key = sub(c.named_children[1]) if len(c.named_children) > 1 else None
+            ann = c.child_by_field_name("type")
+            value = sub(ann.named_children[0]) if ann is not None and ann.named_children else None
+            return _generic("dict", [key, value]) if key is not None and value is not None else None
+        if c.type != "property_signature":
+            return None  # methods, call signatures, index signatures beside fields
+        name = text(c.child_by_field_name("name")).strip("'\"")
+        ann = c.child_by_field_name("type")
+        value = sub(ann.named_children[0]) if ann is not None and ann.named_children else None
+        if value is None or not name.isidentifier():
+            return None
+        if any(ch.type == "?" for ch in c.children):
+            value = ast.Subscript(_name("NotRequired"), value, ast.Load())
+        keywords.append(ast.keyword(name, value))
+    if not keywords:
+        return None
+    return ast.Call(_name(RECORD_HOOK), [], keywords)
 
 
 def _union_members(node: Node) -> list[Node]:
@@ -195,6 +289,8 @@ class _Lowerer:
         self.numeric: set[str] = set()
         self.locals: set[str] = {p.name for p in fn.params}
         self.globals: set[str] = set()
+        self.constants: list[str] = []
+        self._returns_tuple = False
 
     def run(self) -> Lowered:
         fn = self.fn
@@ -204,14 +300,19 @@ class _Lowerer:
             type_node = p.type
             if type_node is None and p.jsdoc_type:
                 type_node = parse_type(p.jsdoc_type)
-            ann = lower_type(type_node, self.numeric)
+            ann = lower_type(type_node, self.numeric, self.module.types)
             typed = typed and ann is not None
             args.append(_at(ast.arg(p.name if p.name.isidentifier() else "_", ann), p.node))
         ret_node = fn.returns
         if ret_node is None and fn.jsdoc_returns:
             ret_node = parse_type(fn.jsdoc_returns)
-        returns = lower_type(ret_node, self.numeric)
+        returns = lower_type(ret_node, self.numeric, self.module.types)
         typed = typed and returns is not None
+        self._returns_tuple = (
+            isinstance(returns, ast.Subscript)
+            and isinstance(returns.value, ast.Name)
+            and returns.value.id == "tuple"
+        )
         self._collect_locals(fn.body)
         head: list[ast.stmt] = []
         if fn.is_async:
@@ -234,7 +335,9 @@ class _Lowerer:
             returns=returns,
             type_params=[],
         )
-        return Lowered(node=_at(node, fn.node), numeric=self.numeric, typed=typed)
+        return Lowered(
+            node=_at(node, fn.node), numeric=self.numeric, typed=typed, constants=self.constants
+        )
 
     def _collect_locals(self, node: Node) -> None:
         for n in walk(node):
@@ -288,6 +391,10 @@ class _Lowerer:
         if t == "return_statement":
             value = s.named_children[0] if s.named_children else None
             result = self.expr(value) if value is not None else ast.Constant(None)
+            if self._returns_tuple and isinstance(result, ast.List) and value is not None:
+                # JS has no tuple literal: `return [a, b]` from a function typed `[A, B]` builds
+                # the tuple (the runner already decodes the real JS array as a tuple).
+                result = ast.Tuple(result.elts, ast.Load())
             return [_at(ast.Return(result), s)]
         if t == "if_statement":
             alt = s.child_by_field_name("alternative")
@@ -309,12 +416,45 @@ class _Lowerer:
         if t == "throw_statement":
             return [_at(ast.Raise(_call("Exception", []), None), s)]
         if t == "try_statement":
-            return [_stmt("try / catch", s)]
+            return [self._opaque("try / catch", s)]
         if t == "switch_statement":
-            return [_stmt("switch", s)]
+            return [self._opaque("switch", s)]
         if t in ("function_declaration", "class_declaration"):
-            return [_stmt(f"a nested {t.split('_')[0]}", s)]
-        return [_stmt(f"the statement `{text(s)[:40]}`", s)]
+            return [self._opaque(f"a nested {t.split('_')[0]}", s)]
+        return [self._opaque(f"the statement `{text(s)[:40]}`", s)]
+
+    def _opaque(self, what: str, s: Node) -> ast.stmt:
+        """A statement Apex cannot lower, carrying the effects found inside it."""
+        return _at(ast.Expr(unsupported(what, s, keep=self._effects(s))), s)
+
+    def _effects(self, node: Node) -> list[ast.expr]:
+        """Effect markers for every call inside a construct that is refused as a whole.
+
+        A refused `try` or `switch` (or object literal) must not hide the I/O inside it: the
+        purity classifier has to see `await addDoc(...)` as I/O, not only the `await`. The scan
+        is syntactic and conservative (callbacks count too), which can only make a function
+        less pure, so the real code is never run when it should not be.
+        """
+        marks: dict[str, ast.expr] = {}
+        for n in walk(node):
+            if n.type not in ("call_expression", "new_expression"):
+                continue
+            callee = n.child_by_field_name("function") or n.child_by_field_name("constructor")
+            root = callee
+            while root is not None and root.type == "member_expression":
+                root = root.child_by_field_name("object")
+            name = text(root) if root is not None and root.type == "identifier" else ""
+            if name in _IO_OBJECTS or name in self.module.imports or name == "require":
+                marks.setdefault("io", _method(_name("os"), "system", []))
+            elif name == "console":
+                marks.setdefault("print", _call("print", []))
+            elif name in _TIMERS:
+                marks.setdefault("timer", _method(_name("asyncio"), "sleep", []))
+            elif name in ("Date", "performance"):
+                marks.setdefault("time", _method(_name("time"), "time", []))
+            elif text(callee) == "Math.random":
+                marks.setdefault("random", _method(_name("random"), "random", []))
+        return list(marks.values())
 
     def _declaration(self, s: Node) -> list[ast.stmt]:
         out: list[ast.stmt] = []
@@ -329,7 +469,7 @@ class _Lowerer:
             ann_node = d.child_by_field_name("type")
             ann = None
             if isinstance(target, ast.Name) and ann_node is not None and ann_node.named_children:
-                ann = lower_type(ann_node.named_children[0], self.numeric)
+                ann = lower_type(ann_node.named_children[0], self.numeric, self.module.types)
             if isinstance(target, ast.Name) and ann is not None:
                 out.append(_at(ast.AnnAssign(target, ann, self.expr(value), 1), d))
             else:
@@ -453,6 +593,10 @@ class _Lowerer:
                 return ast.Constant(None)
             if name in ("Infinity", "NaN"):
                 return ast.Constant(float("inf") if name == "Infinity" else float("nan"))
+            if name not in self.locals and name in self.module.constants:
+                if name not in self.constants:
+                    self.constants.append(name)
+                return self.expr(self.module.constants[name][0])
             return _name(name)
         if t in ("string", "template_string"):
             return ast.Constant(text(e)[1:-1])
@@ -501,8 +645,10 @@ class _Lowerer:
         if t in ("as_expression", "non_null_expression", "satisfies_expression"):
             return self.expr(e.named_children[0])
         if t in ("arrow_function", "function_expression"):
-            return unsupported("a function value outside map/filter/reduce/some/every", e)
-        return unsupported(f"`{text(e)[:40]}`", e)
+            return unsupported(
+                "a function value outside map/filter/reduce/some/every", e, keep=self._effects(e)
+            )
+        return unsupported(f"`{text(e)[:40]}`", e, keep=self._effects(e))
 
     def _array(self, e: Node) -> ast.expr:
         parts: list[ast.expr] = []

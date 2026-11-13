@@ -34,15 +34,16 @@ from pydantic import BaseModel, Field
 from apex.analyze.target import FunctionInfo
 from apex.analyze.types import PyType
 from apex.core.intent import IntentModel
+from apex.core.profile import domains_digest
 from apex.core.report import Counterexample, FuzzEvidence
 from apex.fidelity.bridge import (
     SUPPRESSED_HEALTH_CHECKS,
     FidelityError,
-    ints_for,
-    strategy_for,
+    params_strategy,
     unbounded_int_digits,
 )
-from apex.fidelity.refute import PropertyRefutation, _Check, _violation, load_checks
+from apex.fidelity.refute import PropertyRefutation, _Check, _violation, load_checks, zones_for
+from apex.fidelity.values import TZ_KEY, read_back, time_zone
 
 Engine = Literal["hypothesis", "atheris", "jazzer"]
 ENGINES: tuple[Engine, ...] = ("hypothesis", "atheris", "jazzer")
@@ -96,6 +97,13 @@ def fuzz(
         raise FuzzError("atheris fuzzes Python; for JavaScript use --engine jazzer")
     if engine == "jazzer" and not js:
         raise FuzzError("jazzer fuzzes JavaScript; for Python use --engine atheris")
+    if engine != "hypothesis" and (
+        any(not t.modelled for _, t in params) or info.domains or info.timezones
+    ):
+        raise FuzzError(
+            f"{engine} draws only int, bool, list, tuple and optional inputs, without profile "
+            "domains or time zones; use --engine hypothesis"
+        )
     if engine == "atheris" and not atheris_available():
         raise FuzzError(
             "atheris is not installed: `uv pip install atheris` with a libFuzzer-capable clang "
@@ -117,13 +125,27 @@ def fuzz(
         ],
     )
     hints = {p.id: p.formal_hint for p in intent.properties}
+    zones = zones_for(info, params) if engine == "hypothesis" else []
     for c in target.checks:
         c.max_slow = 1_000_000  # a campaign skips slow inputs and keeps going until its budget
         started = time.monotonic()
         if engine == "hypothesis":
-            _hypothesis_campaign(
-                c, target.fn, params, target.ns, budget_s, ints_for(info), max_executions
-            )
+            strategy = params_strategy(info, params, target.module)
+            for tz in zones or [None]:
+                with time_zone(tz):
+                    _hypothesis_campaign(
+                        c,
+                        target.fn,
+                        params,
+                        target.ns,
+                        budget_s / max(len(zones), 1),
+                        strategy,
+                        max_executions,
+                    )
+                if c.found is not None:
+                    if tz is not None:
+                        c.found.inputs[TZ_KEY] = tz
+                    break
         elif engine == "jazzer":
             _jazzer_campaign(c, info, params, target.fn, target.ns, budget_s)
         else:
@@ -139,6 +161,8 @@ def fuzz(
                 skipped=c.skipped,
                 found=c.found,
                 note=c.note,
+                inputs=domains_digest(info.domains),
+                time_zones=zones,
             )
         )
     return result
@@ -150,7 +174,7 @@ def _hypothesis_campaign(
     params: list[tuple[str, PyType]],
     ns: dict[str, Any],
     budget_s: float,
-    ints: "st.SearchStrategy[int] | None" = None,
+    strategy: "st.SearchStrategy[tuple[Any, ...]]",
     max_executions: int | None = None,
 ) -> None:
     names = [n for n, _ in params]
@@ -169,7 +193,6 @@ def _hypothesis_campaign(
             found.append(cx)  # Hypothesis replays the shrunk example last
             raise _Broken
 
-    strategy = st.tuples(*(strategy_for(t, ints) for _, t in params))
     batch = 0
     while time.monotonic() < deadline and c.found is None and c.calls < limit:
         batch += 1
@@ -206,12 +229,17 @@ def replay(
     names = [n for n, _ in params]
     try:
         target = load_checks(info, intent, names, [evidence.property_id])
-        args = tuple(_literal(evidence.found.inputs[n]) for n in names)
+        args = tuple(read_back(evidence.found.inputs[n], t, target.module) for n, t in params)
     except (FidelityError, KeyError, ValueError, SyntaxError):
         return None
     if not target.checks:
         return None
-    return _violation(target.checks[0], target.fn, names, args, target.ns, "fuzz")
+    tz = evidence.found.inputs.get(TZ_KEY)
+    with time_zone(tz):
+        cx = _violation(target.checks[0], target.fn, names, args, target.ns, "fuzz")
+    if cx is not None and tz is not None:
+        cx.inputs[TZ_KEY] = tz
+    return cx
 
 
 def _jazzer_campaign(

@@ -112,15 +112,16 @@ def test_purity_sees_inside_refused_expressions(tmp_path: Path) -> None:
     ws = Workspace.discover(tmp_path)
     reasons = {
         fn: _analyze(f"{path}::{fn}", ws).gap.reason_code  # type: ignore[union-attr]
-        for fn in ("roll", "noisy", "later", "hidden", "untyped")
+        for fn in ("roll", "noisy", "later", "untyped")
     }
     assert reasons == {
         "roll": ReasonCode.IMPURE_IO,
         "noisy": ReasonCode.IMPURE_IO,
         "later": ReasonCode.NEEDS_CONCURRENCY_TOOL,
-        "hidden": ReasonCode.UNSUPPORTED_CONSTRUCT,  # not exported: Apex cannot run it
         "untyped": ReasonCode.UNSUPPORTED_CONSTRUCT,
     }
+    # Not exported, but it runs from the module's import-free slice.
+    assert _analyze(f"{path}::hidden", ws).gap is None
 
 
 def test_jsdoc_types_type_plain_javascript(tmp_path: Path) -> None:
@@ -203,6 +204,91 @@ def test_discovery_finds_sources_and_skips_tests_and_declarations(tmp_path: Path
     assert targets == [f"{tmp_path / 'a.ts'}::f"]
 
 
+# ---- React / app-style JavaScript --------------------------------------------------------------
+
+
+def test_jsx_in_js_files_parses_and_jsx_files_are_discovered(tmp_path: Path) -> None:
+    # Create React App and Vite projects put JSX in plain .js files.
+    jsx = """
+        /** @param {number} a @param {number} b @returns {number} */
+        export function add(a, b) { return a + b; }
+        export const Badge = ({ n }) => <span className="badge">{n}</span>;
+        """
+    for name in ("a.js", "b.jsx", "c.tsx"):
+        _ts(tmp_path, jsx, name)
+    targets = discover_targets([str(tmp_path)], Workspace.discover(tmp_path))
+    for name in ("a.js", "b.jsx", "c.tsx"):
+        assert f"{tmp_path / name}::add" in targets
+        assert "a + b" in _model(tmp_path / name, "add")  # it lowers like any other module
+
+
+def test_one_unparsable_file_does_not_stop_a_directory_run(tmp_path: Path) -> None:
+    _ts(tmp_path, "export function f(x: number): number { return x; }\n", "good.ts")
+    _ts(tmp_path, "export function g(x: number): number { return x +; }\n", "bad.ts")
+    ws = Workspace.discover(tmp_path)
+    skipped: list[tuple[str, str]] = []
+    targets = discover_targets([str(tmp_path)], ws, skipped=skipped)
+    assert targets == [f"{tmp_path / 'good.ts'}::f"]
+    assert [Path(p).name for p, _ in skipped] == ["bad.ts"]
+    with pytest.raises(Exception, match="does not parse"):  # named directly: still an error
+        load_function(f"{tmp_path / 'bad.ts'}::g")
+
+
+def test_react_components_and_hooks_get_their_own_gap(tmp_path: Path) -> None:
+    path = _ts(
+        tmp_path,
+        """
+        import { useState } from "react";
+        export const Card = ({ title }) => <div>{title}</div>;
+        export function Counter() { const [n, setN] = useState(0); return n; }
+        export function useTotal(xs) { return xs.length; }
+        """,
+        "ui.js",
+    )
+    ws = Workspace.discover(tmp_path)
+    for fn in ("Card", "Counter", "useTotal"):
+        gap = _analyze(f"{path}::{fn}", ws).gap
+        assert gap is not None and "React" in gap.explanation, fn
+        assert "JSDoc" not in " ".join(gap.next_steps), fn  # types would not help a component
+
+
+def test_io_inside_try_and_async_is_reported_as_io(tmp_path: Path) -> None:
+    # A Firestore write wrapped in try/catch: the refused `try` must not hide the I/O, and the
+    # I/O, not the `await`, is what blocks it (TLA+ would be the wrong advice).
+    path = _ts(
+        tmp_path,
+        """
+        import { addDoc, collection } from "firebase/firestore";
+        /** @param {number} x @returns {Promise<number>} */
+        export async function save(x) {
+          try { await addDoc(collection("c"), { x }); return x; } catch (e) { return 0; }
+        }
+        /** @param {number} x @returns {number} */
+        export function tagged(x) {
+          switch (x) { case 1: console.log("one"); return 1; default: return x; }
+        }
+        """,
+        "svc.js",
+    )
+    ws = Workspace.discover(tmp_path)
+    assert _analyze(f"{path}::save", ws).gap.reason_code is ReasonCode.IMPURE_IO  # type: ignore[union-attr]
+    assert _analyze(f"{path}::tagged", ws).gap.reason_code is ReasonCode.IMPURE_IO  # type: ignore[union-attr]
+
+
+def test_array_literal_returned_as_a_typed_tuple(tmp_path: Path) -> None:
+    path = _ts(
+        tmp_path,
+        """
+        export function split(total: number, pct: number): [number, number] {
+          const p = Math.floor((total * pct) / 100);
+          return [p, total - p];
+        }
+        """,
+    )
+    ws = Workspace.discover(tmp_path)
+    assert _analyze(f"{path}::split", ws).model is not None  # was: tuple vs list mismatch
+
+
 # ---- the Node bridge ---------------------------------------------------------------------------
 
 
@@ -235,6 +321,95 @@ def test_real_javascript_runs_with_its_own_semantics(tmp_path: Path) -> None:
     with pytest.raises(CallTimeout):
         m.spin.apex_call((1,), 0.5)
     assert m.rem(7, 3) == 1  # the worker restarts after the timeout
+
+
+@needs_node
+def test_pure_functions_run_from_modules_node_cannot_import(tmp_path: Path) -> None:
+    # Bundler-style app code: an extensionless import, a backend client that fails at load
+    # time, and JSX. Node cannot import the module, so the runner loads its import-free slice.
+    (tmp_path / "firebase.js").write_text('throw new Error("no network");\n')
+    path = _ts(
+        tmp_path,
+        """
+        import { db } from './firebase';
+        const BPS = 10000;
+        const REGISTRY = [];
+        REGISTRY.push(1);
+        /** @param {number} t @param {number} b @returns {number} */
+        export function part(t, b) { return Math.floor((t * b) / BPS); }
+        /** @returns {number} */
+        export function size() { return REGISTRY.length; }
+        /** @param {string} id @returns {number} */
+        export function save(id) { return db.write(id); }
+        export const Badge = ({ n }) => <b>{n}</b>;
+        """,
+        "money.js",
+    )
+    m = load_js_module(load_function(f"{path}::part"))
+    assert m.part(1000, 2500) == 250  # the real source text ran, with its module constant
+    with pytest.raises(JsError, match="uses the import `db`"):
+        load_js_module(load_function(f"{path}::save")).save("x")
+    with pytest.raises(JsError, match="top-level statement may change it"):
+        # REGISTRY.push(...) runs at load time and changes it: never sliced in
+        load_js_module(load_function(f"{path}::size")).size()
+
+
+def test_primitive_module_constants_are_inlined_and_part_of_identity(tmp_path: Path) -> None:
+    src = """
+        const SCALE = 100;
+        const NAMES = ["a"];
+        export function scale(x: number): number { return x * SCALE; }
+        export function shadow(SCALE: number): number { return SCALE + 1; }
+        export function names(i: number): number { return NAMES.length + i; }
+        """
+    path = _ts(tmp_path, src)
+    assert "(x * (100 : Int))" in _model(path, "scale")
+    assert "(SCALE + (1 : Int))" in _model(path, "shadow")  # a parameter shadows the constant
+    assert _gap(path, "names")  # an array is not a primitive: still refused
+    before = load_function(f"{path}::scale").sha256
+    path.write_text(textwrap.dedent(src).replace("SCALE = 100", "SCALE = 1000"))
+    assert load_function(f"{path}::scale").sha256 != before  # editing it voids approvals
+
+
+@needs_node
+def test_helpers_the_module_does_not_export_run_from_its_slice(tmp_path: Path) -> None:
+    path = _ts(
+        tmp_path,
+        """
+        import { db } from './firebase/config';
+        const cents = (n: number): number => Math.round(n * 100);
+        export function total(xs: number[]): number { return xs.length; }
+        """,
+        name="m.ts",
+    )
+    mod = load_js_module(load_function(f"{path}::cents"))
+    assert mod.cents(1.5) == 150 and mod.total([1, 2]) == 2
+
+
+def test_text_in_lean_comments_cannot_open_a_nested_comment() -> None:
+    from apex.theorems.draft import comment_safe
+    from apex.theorems.spec import parse_spec
+
+    header = comment_safe("/tmp/-x/m.ts::f returns a/-b -/")
+    spec = parse_spec(f"/-\nApex spec for {header}\n-/\n\ntheorem P1 : 1 = 1 := by\n  rfl\n")
+    assert [d.name for d in spec.decls] == ["P1"]
+
+
+def test_array_examples_take_the_tuple_shape_of_the_signature(tmp_path: Path) -> None:
+    path = _ts(
+        tmp_path,
+        """
+        /**
+         * @example split(1000, 25) // [250, 750]
+         */
+        export function split(t: number, p: number): [number, number] {
+          const a = Math.floor((t * p) / 100);
+          return [a, t - a];
+        }
+        """,
+    )
+    (ex,) = mine_jsdoc(load_function(f"{path}::split")).examples
+    assert ex.expected == (250, 750)
 
 
 # ---- end to end through Lean -------------------------------------------------------------------

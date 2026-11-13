@@ -17,3 +17,10 @@ them for the last report.
 | `NEEDS_CONCURRENCY_TOOL` | Threads, shared state, locks | Write a TLA+ bundle (TLA.md), ask the user to approve it, `apex tla check <target>` |
 | `SPEC_VIOLATION_NOT_REPRODUCED` | TLC broke an invariant in the spec; no real run showed it | Read TLC's trace (`--json`): add a `check_<Name>` to the harness or more runs if the code can take it; tighten the spec if it cannot |
 | `MODEL_CHECK_FAILED` | TLC could not check the bundle (parse error, budget), or the runs could not be checked against it | Fix the bundle; `apex tla check` again |
+| `CONTROL_FAILED` | A control config of the TLA+ bundle did not give its expected result (a design that must break the invariant did not) | Strengthen the invariant or the spec until the control fails as it should (TLA.md) |
+| `NEEDS_DECISION` | A refuted property carries an open question for the owner | Show the user the counterexample and the question; they rule with `apex decide` in their terminal |
+| `WITHDRAWN` | The owner ruled that the property does not state the intent | Remove it from its source or state the intended rule |
+
+`FLOAT_SEMANTICS` and `UNSUPPORTED_CONSTRUCT` for a *type* (str, float, enums, records, dates)
+only keep Lean out: refutation and fuzzing still run the real code on such inputs. For float
+code, `apex reference add <target> --exact --tolerance 0.005` checks it against exact arithmetic.

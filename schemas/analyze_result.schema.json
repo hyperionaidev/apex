@@ -285,7 +285,10 @@
         "PROOF_REJECTED",
         "NO_STATEMENT",
         "SPEC_VIOLATION_NOT_REPRODUCED",
-        "MODEL_CHECK_FAILED"
+        "MODEL_CHECK_FAILED",
+        "CONTROL_FAILED",
+        "NEEDS_DECISION",
+        "WITHDRAWN"
       ],
       "title": "ReasonCode",
       "type": "string"
@@ -343,7 +346,8 @@
             "test",
             "spec",
             "source",
-            "inferred"
+            "inferred",
+            "reference"
           ],
           "title": "Type",
           "type": "string"

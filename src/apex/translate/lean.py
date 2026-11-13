@@ -22,7 +22,16 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from apex.analyze.target import FunctionInfo
-from apex.analyze.types import BOOL, INT, PyType, UnsupportedType, list_of, parse_annotation
+from apex.analyze.types import (
+    BOOL,
+    INT,
+    PyType,
+    Resolver,
+    UnsupportedType,
+    list_of,
+    parse_annotation,
+    python_resolver,
+)
 from apex.core.verdict import ReasonCode
 
 UNSUPPORTED_HOOK = "__apex_unsupported__"
@@ -204,17 +213,45 @@ def _int_literal(v: int) -> str:
     return f"({v} : Int)"
 
 
-def signature(fn: ast.FunctionDef) -> FunctionSig:
+def signature(fn: ast.FunctionDef, resolve: Resolver | None = None) -> FunctionSig:
+    """The signature in the runnable types (see apex.analyze.types), which Lean may not model."""
     a = fn.args
     if a.vararg or a.kwarg or a.kwonlyargs or a.posonlyargs:
         raise TranslationError("only plain positional parameters are supported", fn)
     try:
-        params = [(p.arg, parse_annotation(p.annotation)) for p in a.args]
-        returns = parse_annotation(fn.returns)
+        params = [(p.arg, parse_annotation(p.annotation, resolve)) for p in a.args]
+        returns = parse_annotation(fn.returns, resolve)
     except UnsupportedType as e:
-        code = ReasonCode.FLOAT_SEMANTICS if "float" in str(e) else ReasonCode.UNSUPPORTED_CONSTRUCT
-        raise TranslationError(f"{fn.name}: {e}", fn, code) from e
+        raise TranslationError(f"{fn.name}: {e}", fn, ReasonCode.UNSUPPORTED_CONSTRUCT) from e
     return FunctionSig(params, returns)
+
+
+def unmodelled_gap(ty: PyType, where: str, node: ast.AST | None) -> "TranslationError":
+    """Why a type keeps a function out of Lean: floats are FLOAT_SEMANTICS, the rest unsupported."""
+    bad = ty.first_unmodelled() or ty
+    if any(t.kind == "float" for t in ty.walk()):
+        return TranslationError(
+            f"{where} is a float (`{ty.python()}`); Lean models exact integers only",
+            node,
+            ReasonCode.FLOAT_SEMANTICS,
+        )
+    return TranslationError(
+        f"{where} has type `{bad.python()}`, which has no Lean model yet (refutation and fuzzing "
+        "still run the real code on it)",
+        node,
+        ReasonCode.UNSUPPORTED_CONSTRUCT,
+    )
+
+
+def lean_signature(fn: ast.FunctionDef, resolve: Resolver | None = None) -> FunctionSig:
+    """The signature, if Lean can model every type in it; else a TranslationError."""
+    sig = signature(fn, resolve)
+    for name, t in sig.params:
+        if not t.modelled:
+            raise unmodelled_gap(t, f"{fn.name}: parameter `{name}`", fn)
+    if not sig.returns.modelled:
+        raise unmodelled_gap(sig.returns, f"{fn.name}: the result", fn)
+    return sig
 
 
 def _body_without_docstring(fn: ast.FunctionDef) -> list[ast.stmt]:
@@ -694,6 +731,8 @@ class _FunctionTranslator:
                     declared = parse_annotation(ann)
                 except UnsupportedType as e:
                     raise TranslationError(str(e), s) from e
+                if not declared.modelled:
+                    raise unmodelled_gap(declared, f"`{name}`", s)
                 t, ty = self.expr(value, env, declared)
                 t = self._coerce(t, ty, declared, value)
                 return self._let(
@@ -854,7 +893,8 @@ def _tuple(items: list[str]) -> str:
 def translate(info: FunctionInfo) -> LeanModel:
     """Translate the target function and its same-module callees into one Lean model."""
     functions = [*info.callees, info]
-    sigs = {f.qualname: signature(f.node) for f in functions}
+    resolve = python_resolver(info.module_tree) if info.language == "python" else None
+    sigs = {f.qualname: lean_signature(f.node, resolve) for f in functions}
     defs, names = [], []
     for f in functions:
         sig = sigs[f.qualname]

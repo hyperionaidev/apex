@@ -18,6 +18,7 @@
 
 import ast
 import contextlib
+import datetime
 from dataclasses import replace
 from typing import Any, Literal
 
@@ -67,6 +68,30 @@ def fits(value: Any, ty: PyType) -> bool:
             )
         case "option":
             return value is None or fits(value, ty.args[0])
+        case "float":
+            return isinstance(value, int | float) and not isinstance(value, bool)
+        case "str":
+            return isinstance(value, str)
+        case "enum":
+            return ty.ref is not None or value in ty.values
+        case "dict":
+            return isinstance(value, dict) and all(
+                fits(k, ty.args[0]) and fits(v, ty.args[1]) for k, v in value.items()
+            )
+        case "record":
+            if ty.ref is not None:
+                return not isinstance(value, dict)
+            fields = dict(zip(ty.names, ty.args, strict=True))
+            return (
+                isinstance(value, dict)
+                and set(value) <= set(fields)
+                and all(n in value for n in ty.names if n not in ty.optional)
+                and all(fits(v, fields[k]) for k, v in value.items())
+            )
+        case "date":
+            return isinstance(value, datetime.date) and not isinstance(value, datetime.datetime)
+        case "datetime":
+            return isinstance(value, datetime.datetime)
     return False
 
 

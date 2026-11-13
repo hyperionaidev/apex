@@ -71,6 +71,13 @@ class ReasonCode(StrEnum):
     the spec may over-approximate the code, or the schedule is rare."""
     MODEL_CHECK_FAILED = "MODEL_CHECK_FAILED"
     """TLC could not check the spec (parse or semantic error, or its budget ran out)."""
+    CONTROL_FAILED = "CONTROL_FAILED"
+    """A control configuration of the TLA+ bundle did not give its expected result (a control
+    that must violate the invariant did not): the invariant may be too weak to catch the bug."""
+    NEEDS_DECISION = "NEEDS_DECISION"
+    """A counterexample raised a question only the owner can answer (`apex decide`)."""
+    WITHDRAWN = "WITHDRAWN"
+    """A person ruled that the property does not state the intent; it is no longer checked."""
 
 
 class ExitCode(IntEnum):

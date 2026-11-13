@@ -12,7 +12,7 @@ JS `number` is a double: integer arithmetic is exact only up to 2**53 - 1. Proof
 intermediate value is a safe integer; code on `bigint` is exact and can be `proven`.
 """
 
-JS_SUFFIXES = (".ts", ".mts", ".cts", ".js", ".mjs", ".cjs")
+JS_SUFFIXES = (".ts", ".mts", ".cts", ".tsx", ".js", ".mjs", ".cjs", ".jsx")
 SAFE_INTEGER_PRECONDITION = (
     "every intermediate value is a safe integer (|v| <= 2**53 - 1): JavaScript `number` "
     "arithmetic is exact only in that range"

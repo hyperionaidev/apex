@@ -634,6 +634,208 @@ def intent_submit(
     _emit_check(check, as_json)
 
 
+reference_app = typer.Typer(
+    help="Reference properties: the function must agree with another implementation (the "
+    "version before a refactor, a git revision, any function) or with its own code run in "
+    "exact arithmetic. Checked by running both, never proven.",
+    no_args_is_help=True,
+)
+app.add_typer(reference_app, name="reference")
+
+
+@reference_app.command("add")
+def reference_add(
+    target: Target,
+    snapshot: Annotated[
+        bool, typer.Option("--snapshot", help="Copy the function as it is now (before a change).")
+    ] = False,
+    git: Annotated[
+        str | None, typer.Option("--git", help="The function as committed at this revision.")
+    ] = None,
+    function: Annotated[
+        str | None,
+        typer.Option(
+            "--function",
+            help="Another function, `path::name` (or the name inside "
+            "the snapshot / git copy, if it was renamed).",
+        ),
+    ] = None,
+    exact: Annotated[
+        bool, typer.Option("--exact", help="The same code in exact (rational) arithmetic.")
+    ] = False,
+    when: Annotated[
+        str | None,
+        typer.Option("--when", help="Only where this condition on the inputs holds (a hint)."),
+    ] = None,
+    tolerance: Annotated[
+        float, typer.Option("--tolerance", help="Allowed numeric difference (e.g. 0.005).")
+    ] = 0.0,
+    as_json: JsonFlag = False,
+) -> None:
+    """Add a reference property to a function."""
+    from apex import pipeline
+
+    kinds = [k for k, on in (("snapshot", snapshot), ("git", git), ("exact", exact)) if on]
+    if len(kinds) > 1:
+        _fail(as_json, "choose one of --snapshot, --git REV and --exact")
+    kind = kinds[0] if kinds else "function" if function else None
+    if kind is None:
+        _fail(as_json, "say what to compare with: --snapshot, --git REV, --function or --exact")
+    with _tool_errors(as_json):
+        result = pipeline.add_reference(
+            target,
+            _workspace(as_json),
+            kind=kind,  # type: ignore[arg-type]
+            function=function,
+            rev=git or "HEAD",
+            when=when,
+            tolerance=tolerance,
+        )
+    if as_json:
+        typer.echo(result.model_dump_json(indent=2))
+    else:
+        console.print(f"added {result.added.id}: {escape(result.added.text())}")
+        console.print(f"    hint: {escape(result.property_hint)}", highlight=False)
+        console.print(result.note)
+
+
+@reference_app.command("list")
+def reference_list(target: Target, as_json: JsonFlag = False) -> None:
+    """The function's references."""
+    from apex.analyze.target import load_function
+    from apex.intent.references import load_references
+
+    ws = _workspace(as_json)
+    with _tool_errors(as_json):
+        refs = load_references(load_function(target), ws.root)
+    if as_json:
+        typer.echo(refs.model_dump_json(indent=2))
+        return
+    for r in refs.references:
+        console.print(f"{r.id}  {escape(r.text())}")
+    if not refs.references:
+        console.print(f"no references for {target}")
+
+
+@app.command()
+def decide(
+    target: Target,
+    prop: Annotated[str, typer.Argument(help="The property ID (P1, E2, ...).")],
+    ask: Annotated[
+        str | None,
+        typer.Option("--ask", help="Record an open question for the owner (anyone may ask)."),
+    ] = None,
+    bug: Annotated[
+        bool, typer.Option("--bug", help="Rule: the counterexample is a defect.")
+    ] = False,
+    intended: Annotated[
+        bool, typer.Option("--intended", help="Rule: the behavior is intended (see --when).")
+    ] = False,
+    when: Annotated[
+        str | None,
+        typer.Option(
+            "--when",
+            help="With --intended: the property applies only where this "
+            "holds. Without it, the property is withdrawn.",
+        ),
+    ] = None,
+    note: Annotated[str | None, typer.Option("--note", help="Why (shown in reports).")] = None,
+    as_json: JsonFlag = False,
+) -> None:
+    """Ask, or rule on, what a property should say after Apex found a case.
+
+    Asking works anywhere. Ruling (--bug, --intended) needs an interactive terminal, like
+    approval, so a coding agent cannot rule on the owner's behalf.
+    """
+    from apex import pipeline
+    from apex.theorems.review import current_reviewer
+
+    ws = _workspace(as_json)
+    if sum([ask is not None, bug, intended]) != 1:
+        _fail(as_json, "use exactly one of --ask, --bug and --intended")
+    if when is not None and not intended:
+        _fail(as_json, "--when goes with --intended")
+    if ask is not None:
+        with _tool_errors(as_json):
+            d = pipeline.ask_decision(target, ws, prop, ask, current_reviewer())
+        if as_json:
+            typer.echo(d.model_dump_json(indent=2))
+        else:
+            console.print(f"asked on {prop}: {escape(ask)}")
+            console.print(
+                f"The owner rules in their terminal: `apex decide {target} {prop} --bug` or "
+                '`--intended [--when "..."]`.'
+            )
+        return
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        flags = "--bug" if bug else "--intended" + (f' --when "{when}"' if when else "")
+        _fail(
+            as_json,
+            "a ruling requires an interactive terminal. Ask the owner to run "
+            f"`apex decide {target} {prop} {flags}` themselves.",
+        )
+    ruling = "bug" if bug else "intended"
+    effect = {
+        "bug": "the property stays; its counterexample is a defect to fix",
+        "intended": f"the property is checked only where `{when}` holds"
+        if when
+        else "the property is withdrawn and no longer checked",
+    }[ruling]
+    reviewer = current_reviewer()
+    console.print(f"You ({reviewer}) rule on {prop} of {target}: {effect}.")
+    if typer.prompt("Type 'decide' to confirm") != "decide":
+        _fail(as_json, "not recorded")
+    with _tool_errors(as_json):
+        d = pipeline.rule_decision(target, ws, prop, ruling, reviewer, when=when, note=note)
+    if as_json:
+        typer.echo(d.model_dump_json(indent=2))
+    else:
+        console.print(f"[green]recorded[/] in {ws.decision_store.path}")
+
+
+@app.command()
+def survey(
+    paths: Annotated[list[str], typer.Argument(help="Files or directories.")],
+    draft: Annotated[
+        bool, typer.Option("--draft", help="Print only the drafted apex.profile.toml.")
+    ] = False,
+    as_json: JsonFlag = False,
+) -> None:
+    """What Apex needs to know about the project that the code does not say.
+
+    For the coding agent: per function, why it is not checkable yet and the clues found in the
+    code (fields, compared literals, money and date use), plus a drafted apex.profile.toml with
+    TODOs. The agent fills those in from the project (schema, forms, tests, docs).
+    """
+    from apex.survey import survey as run_survey
+
+    with _tool_errors(as_json):
+        result = run_survey(paths, _workspace(as_json))
+    if draft:
+        typer.echo(result.profile_draft, nl=False)
+        return
+    if as_json:
+        typer.echo(result.model_dump_json(indent=2))
+        return
+    console.print(
+        f"{len(result.functions)} functions: "
+        + ", ".join(f"{n} {k}" for k, n in sorted(result.counts.items(), key=lambda kv: -kv[1]))
+    )
+    if result.stack:
+        console.print("stack: " + ", ".join(result.stack[:20]), highlight=False)
+    console.print(
+        f"profile: {result.profile or 'none yet (apex survey --draft > apex.profile.toml)'}"
+    )
+    for problem in result.profile_problems:
+        console.print(f"  [red]profile problem[/] {escape(problem)}")
+    for f in result.functions:
+        if f.status in ("ui", "impure", "checkable"):
+            continue
+        console.print(f"[bold]{escape(f.target)}[/]  {f.status}: {escape(f.reason)}")
+        for ask in f.asks:
+            console.print(f"    - {escape(ask)}")
+
+
 ProviderOpt = Annotated[
     str | None,
     typer.Option(help="anthropic, openai, claude-code or codex (default: apex.toml)."),

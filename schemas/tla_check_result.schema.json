@@ -1,5 +1,55 @@
 {
   "$defs": {
+    "ControlResult": {
+      "properties": {
+        "error": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Error"
+        },
+        "expect": {
+          "title": "Expect",
+          "type": "string"
+        },
+        "invariants": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Invariants",
+          "type": "array"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "ok": {
+          "title": "Ok",
+          "type": "boolean"
+        },
+        "violated": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Violated",
+          "type": "array"
+        }
+      },
+      "required": [
+        "name",
+        "expect",
+        "invariants",
+        "ok"
+      ],
+      "title": "ControlResult",
+      "type": "object"
+    },
     "Counterexample": {
       "additionalProperties": false,
       "properties": {
@@ -55,6 +105,18 @@
     },
     "InvariantResult": {
       "properties": {
+        "control_failure": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Control Failure"
+        },
         "error": {
           "anyOf": [
             {
@@ -98,6 +160,13 @@
           },
           "title": "Constants",
           "type": "object"
+        },
+        "controls": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Controls",
+          "type": "array"
         },
         "depth": {
           "anyOf": [
@@ -218,6 +287,13 @@
       ],
       "default": null,
       "title": "Conformance Error"
+    },
+    "controls": {
+      "items": {
+        "$ref": "#/$defs/ControlResult"
+      },
+      "title": "Controls",
+      "type": "array"
     },
     "hung": {
       "default": 0,

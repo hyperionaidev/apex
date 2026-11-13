@@ -3,8 +3,8 @@ name: apex-verify
 description: >-
   Formally verify Python, JavaScript and TypeScript functions using Apex (Lean 4
   proofs, TLA+ model checking, fuzzing). Use when the user asks to prove, verify, or
-  formally check a function; when you have just written or changed a pure function
-  and correctness matters; or when asked for a
+  formally check a function or a project; when you have just written, changed or
+  refactored a function and correctness matters; or when asked for a
   gap report, counterexample, or proof of a property such as bounds, sorting,
   or invariants. Produces proven / refuted / gap verdicts from Apex, never your own.
 license: MIT
@@ -31,6 +31,10 @@ first: hints are JavaScript expressions there.
 2. **Pick the channel.** If `apex_*` MCP tools are available, use them. Otherwise run the CLI
    through `python scripts/apex_run.py <verb> <args>`, which prints a short summary and saves the
    full JSON under `.apex/`.
+   On an existing project (more than a function or two, untyped JS, app code), first run
+   `apex survey <dir>` (`apex_survey`) and supply what it asks for in `apex.profile.toml`:
+   [references/PROJECT.md](references/PROJECT.md). Before refactoring, take a reference
+   snapshot (`apex reference add <target> --snapshot`).
 3. **Analyze.** `apex analyze <target>` (`apex_analyze`). If it is out of scope, report the reason
    code and the pure core; a pure function can still be refuted (step 7) and fuzzed (step 8).
    For concurrent code (`NEEDS_CONCURRENCY_TOOL`, threads, locks), use a TLA+ bundle instead:
@@ -63,7 +67,10 @@ first: hints are JavaScript expressions there.
 
 - Never describe anything as proven unless Apex's verdict says `proven`. `fuzzed` and
   `model_checked` are evidence: say what ran and within which bounds.
-- Never edit `.apex/reviews.json`. Approval is the user's, in their own terminal.
+- Never edit `.apex/reviews.json` or `.apex/decisions.json`. Approval and rulings are the
+  user's, in their own terminal; you may ask (`apex decide --ask`).
+- Never fill `apex.profile.toml` from what a function's body does: profile facts come from the
+  project (schema, forms, tests, docs) or the user.
 - Never weaken or reword a theorem statement to make a proof pass without new approval.
 - Never write a formal hint that describes what the code does instead of what the intent says.
 - Never use `sorry`, `admit`, `axiom`, `unsafe` or `native_decide`; the axiom audit rejects them.

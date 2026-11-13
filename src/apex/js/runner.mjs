@@ -9,7 +9,8 @@
 //                                                                    "error": "TypeError: ..."}
 //
 // Values cross the boundary as JSON with tags: {"$big": "123"} for bigint, {"$float": "NaN"} for
-// non-integral or non-finite numbers. `kinds` says, per argument, whether integers become
+// non-integral or non-finite numbers, {"$date": "<ISO>"} for a Date; other plain objects are
+// records. `kinds` says, per argument, whether integers become
 // `number` or `bigint` (e.g. {"k": "list", "a": [{"k": "bigint"}]}). TypeScript runs through
 // Node's built-in type stripping, so no npm package is involved.
 import { createInterface } from "node:readline";
@@ -24,17 +25,27 @@ function toJs(v, kind) {
     const parts = kind && kind.k === "tuple" ? kind.a : null;
     return v.map((x, i) => toJs(x, parts ? parts[i] : inner));
   }
-  if (typeof v === "object" && "$big" in v) return BigInt(v.$big);
-  if (typeof v === "number" || (typeof v === "object" && "$int" in v)) {
-    const n = typeof v === "number" ? v : v.$int;
-    return kind && kind.k === "bigint" ? BigInt(n) : Number(n);
+  if (typeof v === "object") {
+    if ("$big" in v) return BigInt(v.$big);
+    if ("$date" in v) return new Date(v.$date);
+    if ("$float" in v) return Number(v.$float);
+    if ("$int" in v) return kind && kind.k === "bigint" ? BigInt(v.$int) : Number(v.$int);
+    const out = {};
+    for (const [key, x] of Object.entries(v)) {
+      const fk = kind && kind.k === "record" ? (kind.f || {})[key] : kind && kind.k === "dict" ? kind.a[1] : null;
+      out[key] = toJs(x, fk);
+    }
+    return out;
+  }
+  if (typeof v === "number") {
+    return kind && kind.k === "bigint" ? BigInt(v) : v;
   }
   return v;
 }
 
 let unsafe = false;
 
-function fromJs(v) {
+function fromJs(v, depth = 0) {
   if (v === null || v === undefined) return null;
   if (typeof v === "bigint") return { $big: v.toString() };
   if (typeof v === "number") {
@@ -45,7 +56,18 @@ function fromJs(v) {
     return { $float: String(v) };
   }
   if (typeof v === "boolean" || typeof v === "string") return v;
-  if (Array.isArray(v)) return v.map(fromJs);
+  if (Array.isArray(v)) return v.map((x) => fromJs(x, depth + 1));
+  if (v instanceof Date) {
+    return Number.isNaN(v.getTime()) ? { $other: "Invalid Date" } : { $date: v.toISOString() };
+  }
+  const proto = Object.getPrototypeOf(v);
+  if (depth < 32 && (proto === Object.prototype || proto === null)) {
+    const out = {};
+    for (const [key, x] of Object.entries(v)) {
+      if (x !== undefined && typeof x !== "function") out[key] = fromJs(x, depth + 1);
+    }
+    return out;
+  }
   return { $other: String(v) };
 }
 

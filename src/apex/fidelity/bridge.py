@@ -31,7 +31,9 @@ from hypothesis import strategies as st
 
 from apex.analyze.target import FunctionInfo
 from apex.analyze.types import PyType
+from apex.core.profile import Domain
 from apex.core.report import Counterexample, FidelitySummary
+from apex.fidelity.values import show
 from apex.intent.hints import HintEvalError, evaluate
 from apex.lean.project import LeanProject
 from apex.translate.lean import LeanModel, leading_asserts
@@ -132,20 +134,39 @@ MIXED_INTS = st.one_of(
 assumptions. Drawing every int up to 2**40 would make most loop-bound inputs too slow to run."""
 
 
-def strategy_for(ty: PyType, ints: st.SearchStrategy[int] | None = None) -> st.SearchStrategy[Any]:
-    ints = ints if ints is not None else MIXED_INTS
-    match ty.kind:
-        case "int":
-            return ints
-        case "bool":
-            return st.booleans()
-        case "list":
-            return st.lists(strategy_for(ty.args[0], ints), max_size=12)
-        case "tuple":
-            return st.tuples(*(strategy_for(a, ints) for a in ty.args))
-        case "option":
-            return st.none() | strategy_for(ty.args[0], ints)
-    raise FidelityError(f"no strategy for {ty.kind}")
+def strategy_for(
+    ty: PyType,
+    ints: st.SearchStrategy[int] | None = None,
+    *,
+    domain: "Domain | None" = None,
+    module: Any = None,
+    js: bool = False,
+) -> st.SearchStrategy[Any]:
+    from apex.fidelity.values import strategy_for as value_strategy
+
+    try:
+        return value_strategy(
+            ty, ints if ints is not None else MIXED_INTS, domain=domain, module=module, js=js
+        )
+    except ValueError as e:
+        raise FidelityError(str(e)) from e
+
+
+def params_strategy(
+    info: FunctionInfo,
+    params: list[tuple[str, PyType]],
+    module: Any = None,
+) -> st.SearchStrategy[tuple[Any, ...]]:
+    """Inputs for the whole parameter list: each parameter's type, narrowed by its domain in
+    `apex.profile.toml`."""
+    js = info.language == "js"
+    ints = ints_for(info)
+    return st.tuples(
+        *(
+            strategy_for(t, ints, domain=info.domains.get(n), module=module, js=js)
+            for n, t in params
+        )
+    )
 
 
 def generate_inputs(
@@ -345,7 +366,7 @@ def check_fidelity(
         )
         mismatches.append(
             Counterexample(
-                inputs={k: repr(v) for k, v in zip(names, args, strict=True)},
+                inputs={k: show(v) for k, v in zip(names, args, strict=True)},
                 expected=f"Lean model returns {out!r}",
                 actual=f"Python {actual}",
                 found_by="hypothesis",

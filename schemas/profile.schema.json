@@ -1,0 +1,219 @@
+{
+  "$defs": {
+    "Domain": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "anyOf": [
+            {
+              "enum": [
+                "int",
+                "decimal",
+                "float",
+                "string",
+                "date",
+                "datetime"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "decimal: numbers with at most `places` decimals (money); it makes a JS `number` or Python int parameter a float. Omitted: the parameter's own type.",
+          "title": "Kind"
+        },
+        "max": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max"
+        },
+        "max_length": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Length"
+        },
+        "min": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Lower bound (an ISO date for dates).",
+          "title": "Min"
+        },
+        "near_misses": {
+          "default": false,
+          "description": "Also try values close to `values` (case, spaces, a missing letter): set it when the value comes from outside (a form, a database, an API) without validation.",
+          "title": "Near Misses",
+          "type": "boolean"
+        },
+        "note": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Where this came from (for reviewers).",
+          "title": "Note"
+        },
+        "params": {
+          "description": "Patterns for the parameters it applies to: a name (`amount`), a glob (`*Cents`), `function.param`, or `path::function.param`.",
+          "items": {
+            "type": "string"
+          },
+          "title": "Params",
+          "type": "array"
+        },
+        "pattern": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "A regex strings must match.",
+          "title": "Pattern"
+        },
+        "places": {
+          "anyOf": [
+            {
+              "maximum": 12,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Places"
+        },
+        "values": {
+          "anyOf": [
+            {
+              "items": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "integer"
+                  }
+                ]
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The values the parameter takes (an enum from the data).",
+          "title": "Values"
+        }
+      },
+      "required": [
+        "params"
+      ],
+      "title": "Domain",
+      "type": "object"
+    },
+    "ProjectSection": {
+      "additionalProperties": false,
+      "properties": {
+        "timezones": {
+          "description": "IANA time zones the code runs in; functions with date inputs are checked in each.",
+          "items": {
+            "type": "string"
+          },
+          "title": "Timezones",
+          "type": "array"
+        }
+      },
+      "title": "ProjectSection",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "domains": {
+      "items": {
+        "$ref": "#/$defs/Domain"
+      },
+      "title": "Domains",
+      "type": "array"
+    },
+    "project": {
+      "$ref": "#/$defs/ProjectSection"
+    },
+    "root": {
+      "anyOf": [
+        {
+          "format": "path",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Root"
+    },
+    "signatures": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "title": "Signatures",
+      "type": "object"
+    },
+    "types": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "title": "Types",
+      "type": "object"
+    }
+  },
+  "title": "Profile",
+  "type": "object"
+}

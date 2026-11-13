@@ -27,6 +27,7 @@ beside the module or in `__tests__/`):
 import ast
 import contextlib
 import re
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -35,8 +36,8 @@ from tree_sitter import Node
 from apex.analyze.target import FunctionInfo
 from apex.core.intent import Source
 from apex.intent.candidates import Candidate, Example, Mined
-from apex.js.lower import _Lowerer, _unparen
-from apex.js.parse import JsFunction, JsModule, parse, text, walk
+from apex.js.lower import UNSUPPORTED, _Lowerer, _unparen
+from apex.js.parse import JsFunction, JsModule, parse, parse_file, text, walk
 
 _TAG = re.compile(
     r"^\s*(?:/\*\*)?\s*\*?\s*@(?P<tag>pre|requires|post|ensures|example)\b\s*(?P<body>.*)$"
@@ -75,6 +76,36 @@ def _lowerer() -> _Lowerer:
     return lw
 
 
+_MATH_HINT_OPS = {
+    "`Math.round`": "apex_round",
+    "`Math.ceil`": "apex_ceil",
+    "`Math.floor` of a non-quotient": "apex_floor",
+    "`Math.trunc` of a non-quotient": "apex_trunc",
+}
+
+
+class _HintOps(ast.NodeTransformer):
+    """In a hint, the float operations the function lowering refuses mean what JavaScript means:
+    `Math.round(x)` is `apex_round(x)`, `Number.isInteger(x)` is `apex_is_integer(x)`. Hints
+    are evaluated on the real values (never translated to Lean when they use these)."""
+
+    def visit_Call(self, node: ast.Call) -> ast.AST:
+        self.generic_visit(node)
+        f = node.func
+        if isinstance(f, ast.Name) and f.id == UNSUPPORTED and node.args:
+            what = node.args[0]
+            if isinstance(what, ast.Constant) and what.value in _MATH_HINT_OPS:
+                return ast.Call(ast.Name(_MATH_HINT_OPS[what.value], ast.Load()), node.args[2:], [])
+        if (
+            isinstance(f, ast.Attribute)
+            and isinstance(f.value, ast.Name)
+            and f.value.id == "Number"
+            and f.attr == "isInteger"
+        ):
+            return ast.Call(ast.Name("apex_is_integer", ast.Load()), node.args, [])
+        return node
+
+
 def js_hint(src: str) -> str:
     """A JS-syntax hint (`a && b`, `===`, `xs.length`, `==>`) in Apex's internal hint syntax."""
     parts = [p.strip() for p in src.split("==>")]
@@ -82,7 +113,7 @@ def js_hint(src: str) -> str:
         raise JsHintError(f"`{src}`: use at most one `==>`, with an expression on each side")
     out = []
     for part in parts:
-        node = _lowerer().expr(_expression(part))
+        node = _HintOps().visit(_lowerer().expr(_expression(part)))
         if any(
             isinstance(n, ast.Call)
             and isinstance(n.func, ast.Name)
@@ -119,6 +150,34 @@ def js_literal(node: Node) -> Any:
         return [js_literal(c) for c in node.named_children if c.type != "comment"]
     if t == "string":
         return text(node)[1:-1]
+    if t == "object":
+        from apex.fidelity.values import JsRecord
+
+        out = JsRecord()
+        for prop in node.named_children:
+            if prop.type == "comment":
+                continue
+            if prop.type != "pair":
+                raise ValueError(prop.type)
+            key = prop.child_by_field_name("key")
+            value = prop.child_by_field_name("value")
+            if key is None or value is None:
+                raise ValueError("pair")
+            out[text(key).strip("'\"")] = js_literal(value)
+        return out
+    if t == "new_expression" and text(node.child_by_field_name("constructor")) == "Date":
+        import datetime
+
+        args = node.child_by_field_name("arguments")
+        named = [a for a in args.named_children if a.type != "comment"] if args else []
+        if len(named) == 1 and named[0].type == "string":
+            iso = text(named[0])[1:-1]
+            value = datetime.datetime.fromisoformat(iso.replace("Z", "+00:00"))
+            if value.tzinfo is None:  # a date-only string is UTC midnight in JS
+                if len(iso) > 10:
+                    raise ValueError("a local date-time depends on the time zone")
+                value = value.replace(tzinfo=datetime.UTC)
+            return value
     raise ValueError(t)
 
 
@@ -185,7 +244,7 @@ def mine_jsdoc(info: FunctionInfo) -> Mined:
                 confidence=1.0 if hint else 0.5,
             )
         )
-    return Mined(examples, candidates)
+    return _shaped(Mined(examples, candidates), info)
 
 
 def _example_from_line(line: str, fn: str, loc: str) -> Example | None:
@@ -218,7 +277,16 @@ def _example_from_line(line: str, fn: str, loc: str) -> Example | None:
 
 # ---- tests ------------------------------------------------------------------------------------
 
-_TEST_SUFFIXES = (".test.ts", ".spec.ts", ".test.js", ".spec.js", ".test.mjs", ".test.mts")
+_TEST_SUFFIXES = (
+    ".test.ts",
+    ".spec.ts",
+    ".test.tsx",
+    ".test.js",
+    ".spec.js",
+    ".test.jsx",
+    ".test.mjs",
+    ".test.mts",
+)
 _EQ_MATCHERS = ("toBe", "toEqual", "toStrictEqual")
 _CMP_MATCHERS = {
     "toBeGreaterThan": ">",
@@ -243,13 +311,50 @@ def mine_js_tests(info: FunctionInfo) -> Mined:
     out = Mined([], [])
     for path in find_js_test_files(info):
         out = out + _mine_test_file(path, info)
-    return out
+    return _shaped(out, info)
+
+
+def _as_type(value: Any, ty: Any) -> Any:
+    """A JS literal in the shape of its declared type: JavaScript has no tuple literal, so an
+    array written for a `[A, B]` (tuple) type is that tuple."""
+    if ty is None:
+        return value
+    if ty.kind == "tuple" and isinstance(value, list) and len(value) == len(ty.args):
+        return tuple(_as_type(v, t) for v, t in zip(value, ty.args, strict=True))
+    if ty.kind == "list" and isinstance(value, list):
+        return [_as_type(v, ty.args[0]) for v in value]
+    if ty.kind == "option" and value is not None:
+        return _as_type(value, ty.args[0])
+    if ty.kind == "record" and isinstance(value, dict):
+        fields = dict(zip(ty.names, ty.args, strict=True))
+        return type(value)({k: _as_type(v, fields.get(k)) for k, v in value.items()})
+    if ty.kind == "float" and isinstance(value, int) and not isinstance(value, bool):
+        return float(value)
+    return value
+
+
+def _shaped(mined: Mined, info: FunctionInfo) -> Mined:
+    from apex.translate.lean import TranslationError, signature
+
+    try:
+        sig = signature(info.node)
+    except TranslationError:
+        return mined
+    examples = [
+        replace(
+            e,
+            args=tuple(_as_type(a, t) for a, (_, t) in zip(e.args, sig.params, strict=False)),
+            expected=_as_type(e.expected, sig.returns),
+        )
+        for e in mined.examples
+    ]
+    return Mined(examples, mined.candidates)
 
 
 def _mine_test_file(path: Path, info: FunctionInfo) -> Mined:
     fn = info.qualname
     source = path.read_text()
-    root = parse(source)
+    root = parse_file(source, path)
     examples: list[Example] = []
     candidates: list[Candidate] = []
     for node in walk(root):

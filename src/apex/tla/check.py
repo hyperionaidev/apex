@@ -19,11 +19,29 @@ from pydantic import BaseModel, Field
 
 from apex.core.report import Counterexample, ModelCheckEvidence
 from apex.tla import conform
-from apex.tla.bundle import HARNESS, SPEC, Bundle
+from apex.tla.bundle import HARNESS, SPEC, Bundle, Control, strip_checks
 from apex.tla.tlc import TlcOutcome, run_tlc, translate_pluscal
 
 MAX_TRACES = 50
 """Distinct recorded traces checked by TLC per run of `apex tla check` (one JVM start each)."""
+
+
+class ControlResult(BaseModel):
+    name: str
+    expect: str
+    invariants: list[str]
+    violated: list[str] = Field(default_factory=list)
+    ok: bool
+    """TLC found what the control says it must."""
+    error: str | None = None
+
+    def describe(self) -> str:
+        found = f"violates {', '.join(self.violated)}" if self.violated else "holds"
+        if self.error:
+            found = f"could not be checked ({self.error})"
+        want = "violates " + ", ".join(self.invariants) if self.expect == "violates" else "holds"
+        mark = "as expected" if self.ok else f"but must {want}"
+        return f"control {self.name}: {found}, {mark}"
 
 
 class InvariantResult(BaseModel):
@@ -32,6 +50,8 @@ class InvariantResult(BaseModel):
     """The invariant breaking in a real run (from the harness's `check_<Name>`)."""
     error: str | None = None
     """TLC could not check the spec."""
+    control_failure: str | None = None
+    """A control naming this invariant did not give its expected result."""
 
 
 class TlaCheckResult(BaseModel):
@@ -45,6 +65,7 @@ class TlaCheckResult(BaseModel):
     conformance_error: str | None = None
     """Why the real code could not be checked against the spec: then nothing is model_checked."""
     note: str | None = None
+    controls: list[ControlResult] = Field(default_factory=list)
 
 
 def check_bundle(
@@ -70,6 +91,9 @@ def check_bundle(
                 if translation_error
                 else run_tlc(work, "Spec", base + f"\nINVARIANT {inv}\n", timeout_s=tlc_timeout_s)
             )
+
+        for control in bundle.controls:
+            result.controls.append(_run_control(work, control, translation_error, tlc_timeout_s))
 
         harness = conform.load_harness(bundle.dir / HARNESS, code_file.parent)
         rec = conform.record(
@@ -124,6 +148,8 @@ def check_bundle(
                     + f" after {len(trace)} observed states",
                     found_by="stress",
                 )
+            related = [c for c in result.controls if inv in c.invariants or c.expect == "holds"]
+            failed = [c.describe() for c in related if not c.ok]
             result.invariants[bundle.property_ids[bundle.invariants.index(inv)]] = InvariantResult(
                 evidence=ModelCheckEvidence(
                     property_id=f"T_{inv}",
@@ -139,8 +165,39 @@ def check_bundle(
                     traces_checked=result.traces_checked,
                     rejected_trace=rejected,
                     note=result.note,
+                    controls=[c.describe() for c in related],
                 ),
                 observed=observed,
                 error=(None if o.ok else o.error) or result.conformance_error,
+                control_failure="; ".join(failed) or None,
             )
     return result
+
+
+def _run_control(
+    work: Path, control: Control, translation_error: str | None, timeout_s: float
+) -> ControlResult:
+    """TLC on one control: `holds` needs a clean run; `violates` needs each named invariant
+    violated (checked one at a time, since TLC stops at the first violation)."""
+    out = ControlResult(
+        name=control.name, expect=control.expect, invariants=control.invariants, ok=False
+    )
+    if translation_error:
+        out.error = translation_error
+        return out
+    if control.expect == "holds":
+        o = run_tlc(work, "Spec", control.cfg, timeout_s=timeout_s)
+        out.violated = sorted(o.violations)
+        out.error = None if o.ok else o.error
+        out.ok = o.ok and not o.violations
+        return out
+    base = strip_checks(control.cfg)
+    for inv in control.invariants:
+        o = run_tlc(work, "Spec", base + f"\nINVARIANT {inv}\n", timeout_s=timeout_s)
+        if not o.ok:
+            out.error = o.error
+            return out
+        if inv in o.violations:
+            out.violated.append(inv)
+    out.ok = out.violated == control.invariants
+    return out

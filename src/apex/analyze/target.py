@@ -3,8 +3,13 @@
 import ast
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from apex.analyze.types import PyType, Resolver
 
 from apex.core.hashing import sha256_text
+from apex.core.profile import Domain, Profile, current_profile, python_signature
 
 
 class TargetError(ValueError):
@@ -34,6 +39,17 @@ class FunctionInfo:
     typed: bool = True
     """JS only: every parameter and the result carry a TypeScript or JSDoc type."""
     jsdoc: str | None = None
+    ui_kind: str | None = None
+    """JS only: `component` (renders JSX) or `hook` (a React `useX` hook), else None."""
+    signature_from_profile: str | None = None
+    """The signature `apex.profile.toml` gives this untyped function, if any."""
+    domains: dict[str, "Domain"] = field(default_factory=dict)
+    """Parameter -> the input domain the profile gives it (which values refutation draws)."""
+    timezones: tuple[str, ...] = ()
+    """The profile's time zones (date code is checked in each)."""
+    runtime_returns: "PyType | None" = None
+    """The result type refutation expects (set by the analysis: a JS `number` is a float in
+    float code)."""
 
     @property
     def lineno(self) -> int:
@@ -51,6 +67,32 @@ class FunctionInfo:
     @property
     def docstring(self) -> str | None:
         return ast.get_docstring(self.node)
+
+    def resolver(self) -> "Resolver | None":
+        """Resolves type names in a Python signature: same-module classes and aliases, then the
+        profile's [types]. JS signatures are resolved when they are lowered."""
+        if self.language != "python":
+            return None
+        from apex.analyze.types import parse_annotation, python_resolver
+
+        local = python_resolver(self.module_tree)
+        named = current_profile(self.path.parent).types
+
+        def resolve(name: str) -> "PyType | None":
+            found = local(name)
+            if found is None and name in named:
+                return parse_annotation(ast.parse(named[name], mode="eval").body, resolve)
+            return found
+
+        return resolve
+
+
+def apply_profile(info: FunctionInfo, profile: Profile, params: list[str]) -> None:
+    """Record the profile's domains and time zones for the function's parameters."""
+    info.timezones = tuple(profile.project.timezones)
+    for p in params:
+        if (d := profile.domain_for(info.path, info.qualname, p)) is not None:
+            info.domains[p] = d
 
 
 def parse_target(target: str) -> tuple[Path, str]:
@@ -84,6 +126,21 @@ def top_level_functions(path: Path) -> list[str]:
     return list(_top_level_functions(tree))
 
 
+def parses(path: Path) -> bool:
+    """Whether a source file parses (Python with `ast`, JS / TS with tree-sitter)."""
+    from apex.js import is_js
+
+    try:
+        if is_js(path):
+            from apex.js.parse import parse_file
+
+            return not parse_file(path.read_text(), path).has_error
+        ast.parse(path.read_text(), filename=str(path))
+        return True
+    except (OSError, UnicodeDecodeError, SyntaxError, ValueError):
+        return False
+
+
 def load_function(target: str) -> FunctionInfo:
     path, qualname = parse_target(target)
     from apex.js import is_js
@@ -100,11 +157,31 @@ def load_function(target: str) -> FunctionInfo:
     functions = _top_level_functions(tree)
     if qualname not in functions:
         raise TargetError(f"{path} has no top-level function `{qualname}`")
+    profile = current_profile(path.parent)
+    overrides: dict[str, str] = {}
+    for name, node in functions.items():
+        if (sig := profile.signature_for(path, name)) is None:
+            continue
+        try:
+            anns, ret = python_signature(sig, name)
+        except (SyntaxError, ValueError) as e:
+            raise TargetError(f"apex.profile.toml: signature of {path}::{name}: {e}") from e
+        if len(anns) != len(node.args.args):
+            raise TargetError(
+                f"apex.profile.toml: the signature of {path}::{name} has {len(anns)} parameters; "
+                f"the function has {len(node.args.args)}"
+            )
+        for a, ann in zip(node.args.args, anns, strict=True):
+            a.annotation = ann
+        node.returns = ret
+        overrides[name] = sig
 
     def info(name: str) -> FunctionInfo:
         node = functions[name]
         src = ast.get_source_segment(module_source, node) or ast.unparse(node)
-        return FunctionInfo(
+        if name in overrides:  # the profile's types are part of what was verified
+            src = f"# apex.profile.toml: {name}{overrides[name]}\n{src}"
+        fi = FunctionInfo(
             path=path,
             module=path.stem,
             qualname=name,
@@ -112,7 +189,10 @@ def load_function(target: str) -> FunctionInfo:
             source=src,
             module_tree=tree,
             module_source=module_source,
+            signature_from_profile=overrides.get(name),
         )
+        apply_profile(fi, profile, [a.arg for a in node.args.args])
+        return fi
 
     root = info(qualname)
     order: list[str] = []

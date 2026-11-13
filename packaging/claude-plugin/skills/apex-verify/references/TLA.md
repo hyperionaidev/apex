@@ -25,3 +25,20 @@ configured model for one; in host mode, write it yourself:
 Then: show the user the bundle and ask them to run `apex review <target> --approve T_...` (one
 approval covers the whole bundle; any edit voids it), and run `apex tla check <target>`
 (`apex_tla_check`) and `apex verify <target>`.
+
+## Controls: an invariant that cannot fail proves nothing
+
+Add `controls/<name>.cfg` to the bundle for each design that must break an invariant (the guard
+removed, the old version), usually selected by a constant in the spec. The first lines say what
+TLC must find:
+
+```
+\* expect: violates NoLostUpdate
+SPECIFICATION Spec
+CONSTANTS Design = "unguarded"
+INVARIANT NoLostUpdate
+```
+
+`apex tla check` runs every control. If one does not give its expected result, the invariants it
+names are reported `unproven` (`CONTROL_FAILED`) instead of `model_checked`. Controls are part of
+the bundle the user approves.

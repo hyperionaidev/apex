@@ -27,6 +27,9 @@ TOOLS = {
     "apex_explain",
     "apex_suggest",
     "apex_review_status",
+    "apex_survey",
+    "apex_reference_add",
+    "apex_decision_ask",
 }
 
 

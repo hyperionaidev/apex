@@ -70,6 +70,7 @@ confirm that each statement agrees with the intended behavior of the code.
   - [Command line](#command-line)
   - [Model-assisted steps](#model-assisted-steps)
   - [Coding agents: skill and MCP](#coding-agents-skill-and-mcp)
+  - [Existing projects: survey, profile, references, decisions](#existing-projects-survey-profile-references-decisions)
   - [Fuzzing and refutation](#fuzzing-and-refutation)
   - [TLA+ for concurrent code](#tla-for-concurrent-code)
   - [JavaScript and TypeScript](#javascript-and-typescript)
@@ -325,6 +326,9 @@ apex review   mathx.py::clamp         # shows the statements and their review st
 apex prove    mathx.py::clamp --tactics-only   # tries the tactic tiers, then verifies
 apex verify   mathx.py::clamp         # cold Lean compile, axiom audit, fidelity check, refutation
 apex refute   mathx.py::clamp         # searches the real code for counterexamples
+apex survey   src/                    # what a project must tell Apex (see Existing projects)
+apex reference add mathx.py::clamp --snapshot  # the current version, as a reference
+apex decide   mathx.py::clamp P1 --ask "..."   # a question for the owner
 ```
 
 A target has the form `path::function`. All commands accept `--json`. The JSON schemas are in
@@ -380,6 +384,85 @@ proof, the server returns the Lean errors, the line in the file that the agent e
 goal state. The smoke tests run Claude Code and Codex through a full cycle: write the code, fail
 verification, read the counterexample, correct the code, pass.
 
+### Existing projects: survey, profile, references, decisions
+
+App code differs from a small algorithm. It is often untyped. Its bugs live in records,
+strings, dates and float money arithmetic. And some of what it should do is a product decision
+that the code does not record. Apex does not guess project facts. The coding agent finds them in
+the project, and Apex checks the code against them.
+
+```sh
+apex survey src/                     # what Apex cannot read from the code, with clues
+apex survey src/ --draft             # a drafted apex.profile.toml with TODOs
+```
+
+**Survey.** For each function, the survey says why it is not checkable yet. It also gives clues
+from the code: the fields that a parameter is read through, the literals that it is compared with,
+and whether it is used as money, a date or a list. The agent reads the schema, the forms, the tests
+and the docs, and writes `apex.profile.toml`. A person reviews that file like any other diff.
+
+```toml
+[project]
+timezones = ["UTC", "America/New_York"]        # date code runs in each
+
+[types]
+Invoice = "{ amount: number; status: 'draft' | 'active' | 'closed'; paid?: number }"
+
+[signatures]                                   # types for untyped functions; source unchanged
+"src/utils/invoices.js::isOpen" = "(inv: Invoice) => boolean"
+
+[[domains]]                                    # which values to draw
+params = ["*.amount"]
+kind = "decimal"
+places = 2
+note = "invoice amounts in dollars, from the invoice form"
+
+[[domains]]
+params = ["status"]
+values = ["draft", "active", "closed"]
+near_misses = true                             # unvalidated input: also "Active", " active"
+```
+
+**Runnable types.** Strings, floats, string enums, records (TS object types, interfaces, JSDoc
+`@typedef`, TypedDict, dataclasses), `dict[str, T]`, dates and `Date` have no Lean model. Apex
+generates them and runs the real code on them, for refutation and fuzzing. The generators prefer
+the inputs where application bugs occur:
+
+- decimals that floats cannot represent exactly (0.1, 1.15) and exact halves (1.005);
+- strings that are close to the expected values (case, spaces, a missing letter);
+- month ends, leap days, and daylight-saving transitions in each listed time zone;
+- records with each combination of optional fields.
+
+**References.** A reference property states that the function agrees with another
+implementation. Apex checks it by running both.
+
+```sh
+apex reference add src/totals.js::computeTotals --snapshot      # before a refactor
+apex reference add src/totals.js::computeTotals --git HEAD      # the committed version
+apex reference add src/fees.js::fee --exact --tolerance 0.005   # the same code, exact arithmetic
+apex refute src/totals.js::computeTotals                        # where they disagree
+```
+
+`--exact` runs the function's own code on exact rationals. For JavaScript, it uses Apex's
+conversion of the function to Python. Apex checks that conversion against the real JavaScript on
+each input before it uses the result. `--when "<condition>"` limits a reference to the inputs
+where it applies. A reference property can be `refuted` or `fuzzed`, never `proven`.
+
+**Decisions.** Sometimes a counterexample is intended behavior. Examples: a negative total that
+is rejected elsewhere, or a one-cent difference that the business accepts. Anyone can record the
+question with `apex decide <target> P2 --ask "..."`, and the report shows it (`NEEDS_DECISION`).
+Only a person in an interactive terminal can rule:
+
+- `--bug`: the counterexample is a defect.
+- `--intended --when "<condition>"`: the property applies only where the condition holds.
+- `--intended` alone: the property is withdrawn (`WITHDRAWN`).
+
+Rulings are stored in `.apex/decisions.json`. A ruling lapses when the property changes.
+
+The MCP server has the same functions: `apex_survey`, `apex_reference_add` and
+`apex_decision_ask`. The skill's [PROJECT.md](skill/apex-verify/references/PROJECT.md) gives the
+procedure to the agent.
+
 ### Fuzzing and refutation
 
 Refutation runs during each check. It uses these methods:
@@ -433,9 +516,19 @@ specification.
 | A real run that the specification does not permit | `fidelity_failed` |
 | TLC found a violation, but no real run showed it | `unproven`, with the TLC trace |
 
+**Controls.** An invariant that cannot fail proves nothing. A bundle can contain
+`controls/<name>.cfg` files. Each file is a TLC config for a design that must break an
+invariant, for example the design without its guard. Its first line states what TLC must find
+(`\* expect: violates NoLostUpdate`). If a control does not give its expected result, the
+invariants that it names get `unproven` (`CONTROL_FAILED`), not `model_checked`.
+
 ### JavaScript and TypeScript
 
-Apex accepts `.ts`, `.mts`, `.js` and `.mjs` files. The procedure is the same as for Python.
+Apex accepts `.ts`, `.mts`, `.js`, `.mjs`, `.jsx` and `.tsx` files, and JSX in `.js` files.
+The procedure is the same as for Python. Some modules are written for a bundler: they use
+extensionless imports, or they import a backend client when they load. Node cannot import such a
+module, so Apex runs an import-free copy of its own declarations. That copy also runs functions
+that the module does not export.
 
 ```ts
 /**
@@ -468,13 +561,13 @@ fidelity check run the real JavaScript in Node.js.
 |---|---|
 | Intent | JSDoc `@pre`, `@post` and `@example`. Jest and Vitest `expect(f(...)).toBe(v)`. node:assert. fast-check `fc.property(...)`: its bounds become premises. `<module>.spec.md`. |
 | Hints | JavaScript expressions. `result` is the return value and `==>` means "implies". |
-| Types | TypeScript types, or JSDoc `@param {number} x` and `@returns {number}` in plain JavaScript. A function without types gives a gap. |
+| Types | TypeScript types, JSDoc `@param {number} x` and `@returns {number}` (and `@typedef`) in plain JavaScript, or a signature in `apex.profile.toml`. A function without types gives a gap. String-literal unions, object types, `Record<string, T>` and `Date` are checked on the real code. |
 | `number` | A 64-bit float. Integer arithmetic is exact only up to 2⁵³ − 1. Proofs get `proven_conditional`, with the precondition that each intermediate value is a safe integer. Searches skip inputs outside this range. |
 | `bigint` | Exact. Proofs can get `proven`. |
 | Kept semantics | `%` truncates toward zero (`-3 % 2` is `-1`). Only `Math.floor(a / b)` and `Math.trunc(a / b)` are integer division. `===` on arrays compares references, thus Apex does not accept it. |
-| Not accepted | `==` (type conversion), bitwise operators (32-bit), `this`, classes, `try`, `switch`, strings, floats, indexing, `while`, `return` in a loop |
+| Not accepted by the Lean model | `==` (type conversion), bitwise operators (32-bit), `this`, classes, `try`, `switch`, strings, floats, indexing, `while`, `return` in a loop. Refutation and fuzzing still run such functions when they are pure. A `number` parameter is drawn as a float when a profile domain says so, or when float code has a decimal example or an `--exact` reference. |
 | Impure code | `console`, `Math.random`, `Date`, `fs`, `process`, `fetch`, timers, `async`, and changes to an argument. Apex finds these before it runs the code. |
-| Exports | Apex runs only exported functions. A function that is not exported gives a gap. |
+| Exports | A function that the module does not export runs from the module's import-free copy, if it uses no import. |
 | Engines | Lean 4 (proofs). Hypothesis and Jazzer.js (fuzzing). CrossHair and TLA+ are available for Python only. |
 
 ### Continuous integration
@@ -688,7 +781,13 @@ no specified behavior.
   - A proof about `number` code is conditional. It is valid only while each intermediate value is
     a safe integer. Use `bigint` for an unconditional proof.
   - CrossHair and TLA+ are available for Python only.
-  - Apex runs only exported functions.
+- **App code.**
+  - Apex checks runnable types (strings, floats, records, dates) by running the code. Lean
+    cannot prove properties about these types.
+  - Profile facts and references are only as good as their source. A domain or signature that
+    is read off the function body makes Apex check the code against itself.
+  - React components and functions with I/O stay out of scope. Move their logic into a plain
+    function.
 - **All engines.** Apex does not verify performance. A requirement such as "runs in linear time"
   has no formal hint and stays as text.
 
@@ -765,6 +864,7 @@ tests/           unit, Lean, installation, TLA+ and JavaScript tests; canaries; 
 | 5 | Hardening: eval corpus, quickstart, limits page |
 | 6 | Fuzzing and refutation engine (campaigns), TLA+ engine for concurrent code |
 | 7 | JavaScript and TypeScript: conversion to the shared subset, Node.js bridge, JSDoc, Jest and fast-check intent, Jazzer.js |
+| 8 | App code: JSX, bundler modules, runnable types, project profile and survey, reference properties (refactors, exact arithmetic), decision records, TLA+ controls |
 
 ## License
 

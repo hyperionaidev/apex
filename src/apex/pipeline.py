@@ -20,9 +20,11 @@ from pydantic import BaseModel
 from apex import __version__
 from apex.analyze.purity import PurityResult, classify
 from apex.analyze.target import FunctionInfo, load_function
+from apex.analyze.types import FLOAT, map_ints
 from apex.core.config import ApexConfig
 from apex.core.hashing import sha256_text
 from apex.core.intent import Conflict, IntentModel, Property
+from apex.core.profile import domains_digest
 from apex.core.report import (
     FunctionResult,
     FuzzEvidence,
@@ -43,7 +45,7 @@ from apex.intent.candidates import Example, Mined
 from apex.intent.docstring import mine_docstring
 from apex.intent.english import SpecItem, mine_english
 from apex.intent.fuse import fuse, module_functions
-from apex.intent.hints import HintError, parse_hint
+from apex.intent.hints import HintError, parse_condition, parse_hint
 from apex.intent.proposals import (
     ProposalCheck,
     ProposalSet,
@@ -51,13 +53,15 @@ from apex.intent.proposals import (
     merge,
     to_candidates,
 )
+from apex.intent.references import mine_references
 from apex.intent.source import mine_source
 from apex.intent.tests import mine_tests
 from apex.js import SAFE_INTEGER_PRECONDITION
 from apex.lean.compiler import LeanMessage, TheoremOutcome, compile_and_audit, run_lean
 from apex.lean.project import LeanProject
 from apex.prove.tactics import probe
-from apex.theorems.draft import DraftError, draft_property, formal_preconditions
+from apex.theorems.decisions import Decision, DecisionStore, DecisionView
+from apex.theorems.draft import DraftError, comment_safe, draft_property, formal_preconditions
 from apex.theorems.review import ReviewStore
 from apex.theorems.spec import Spec, SpecDecl, SpecError, parse_spec, render_decl
 from apex.tla.bundle import Bundle, BundleError, load_bundle
@@ -69,6 +73,7 @@ from apex.translate.literals import LiteralError, to_lean
 
 if TYPE_CHECKING:
     from apex.core.outputs import ReviewStatus
+    from apex.intent.references import ReferenceResult
     from apex.llm.providers import Provider
 
 FILE_HEADER = "import Apex.Prelude\n"
@@ -218,6 +223,10 @@ class Workspace:
         return ReviewStore(self.root / self.config.review_store)
 
     @property
+    def decision_store(self) -> DecisionStore:
+        return DecisionStore(self.apex_dir / "decisions.json")
+
+    @property
     def last_report(self) -> Path:
         return self.apex_dir / "last_report.json"
 
@@ -257,6 +266,8 @@ class _Analysis:
     """The signature in the supported types, even when the body cannot be modelled."""
     spec_items: list[SpecItem] = field(default_factory=list)
     english_files: list[Path] = field(default_factory=list)
+    decisions: dict[str, DecisionView] = field(default_factory=dict)
+    """Property ID -> the decision record on it (with the hint as the sources state it)."""
 
     @property
     def params(self) -> list[str]:
@@ -269,6 +280,11 @@ class _Analysis:
 
 def _purity_gap(purity: PurityResult) -> Gap:
     first = purity.findings[0]
+    io = [f for f in purity.findings if f.reason_code is ReasonCode.IMPURE_IO]
+    if first.reason_code is ReasonCode.NEEDS_CONCURRENCY_TOOL and io:
+        # `async` code that awaits I/O (a database, the network) is blocked by the I/O, not by a
+        # concurrency protocol: pointing it at TLA+ would send the user the wrong way.
+        first = io[0]
     steps = []
     if purity.pure_core:
         steps.append("Verify the extracted pure core instead (the side effects are separable).")
@@ -299,6 +315,70 @@ def _translation_gap(e: TranslationError) -> Gap:
     )
 
 
+def _has_decimal(v: object) -> bool:
+    if isinstance(v, float):
+        return not v.is_integer()
+    if isinstance(v, list | tuple):
+        return any(_has_decimal(x) for x in v)
+    if isinstance(v, dict):
+        return any(_has_decimal(x) for x in v.values())
+    return False
+
+
+def _runs_privately(info: FunctionInfo) -> bool:
+    """A function the module does not export still runs when the module's import-free slice
+    keeps it (see apex.js.slice): it uses no import, no JSX and no state set at load time."""
+    if os.environ.get("APEX_JS_ASSUME_EXPORTED"):
+        return True
+    from apex.js.slice import build_slice
+
+    try:
+        return info.qualname in build_slice(Path(info.path)).kept
+    except Exception:
+        return False
+
+
+def _runtime_signature(
+    info: FunctionInfo, sig: FunctionSig, gap: Gap | None, purity: PurityResult, mined: Mined
+) -> tuple[FunctionSig, str | None]:
+    """The types refutation and fuzzing draw, and why they differ from the Lean model's, if so.
+
+    JS has one `number` type, and the code alone does not say whether a parameter is meant to
+    be an integer or a decimal: `(a - a % b) / b` is integer division written with `/`. A
+    counterexample must be an input the function is meant for, so Apex draws integers unless
+    something states otherwise:
+
+    - a profile `decimal` or `float` domain makes the parameter a float (in any function);
+    - in float code (`/`, `Math.round`, ...), so does an example from the docs or tests that
+      passes it a decimal, or an exact-arithmetic reference on the function.
+    """
+    float_code = (
+        info.language == "js"
+        and "number" in info.numeric
+        and (
+            (gap is not None and gap.reason_code is ReasonCode.FLOAT_SEMANTICS)
+            or any(f.reason_code is ReasonCode.FLOAT_SEMANTICS for f in purity.findings)
+        )
+    )
+    why = None
+    params = []
+    exact_ref = any(c.hint is not None and "apex_exact(" in c.hint for c in mined.candidates)
+    for i, (name, t) in enumerate(sig.params):
+        d = info.domains.get(name)
+        has_int = any(x.kind == "int" for x in t.walk())
+        decimal_example = any(i < len(e.args) and _has_decimal(e.args[i]) for e in mined.examples)
+        if d is not None and d.kind in ("decimal", "float") and has_int:
+            t = map_ints(t, FLOAT)
+            why = why or (
+                f"apex.profile.toml gives `{name}` the domain `{d.describe()}`, so it is a float"
+            )
+        elif float_code and (decimal_example or exact_ref) and not (d and d.kind == "int"):
+            t = map_ints(t, FLOAT)
+        params.append((name, t))
+    returns = map_ints(sig.returns, FLOAT) if float_code else sig.returns
+    return FunctionSig(params, returns), why
+
+
 def _analyze(target: str, ws: "Workspace | None" = None) -> _Analysis:
     """Stage 1: purity, the Lean model, and every intent source fused into one Intent Model.
 
@@ -309,7 +389,19 @@ def _analyze(target: str, ws: "Workspace | None" = None) -> _Analysis:
     purity = classify(info.node, info.module_tree)
     model, gap = None, None
     js = info.language == "js"
-    if purity.class_ != "pure":
+    if js and info.ui_kind is not None:
+        what = "a React component" if info.ui_kind == "component" else "a React hook"
+        gap = Gap(
+            reason_code=ReasonCode.UNSUPPORTED_CONSTRUCT,
+            explanation=f"`{info.qualname}` is {what}: its result depends on React's render "
+            "cycle and state, not only on its arguments, so Apex does not model it.",
+            next_steps=[
+                "Move the calculation or decision it makes into a plain exported function that "
+                "takes its inputs as arguments (for example in src/utils), type that function, "
+                "and check it with Apex; the component then calls it."
+            ],
+        )
+    elif purity.class_ != "pure":
         gap = _purity_gap(purity)
     elif js and not info.typed:
         gap = Gap(
@@ -320,7 +412,7 @@ def _analyze(target: str, ws: "Workspace | None" = None) -> _Analysis:
                 "Add TypeScript types, or JSDoc `@param {number} x` and `@returns {number}`."
             ],
         )
-    elif js and not info.exported:
+    elif js and not info.exported and not _runs_privately(info):
         gap = Gap(
             reason_code=ReasonCode.UNSUPPORTED_CONSTRUCT,
             explanation=f"`{info.qualname}` is not exported, so Apex cannot run it: refutation, "
@@ -335,10 +427,9 @@ def _analyze(target: str, ws: "Workspace | None" = None) -> _Analysis:
     sig = model.target_sig if model else None
     if sig is None:
         try:
-            sig = signature(info.node)
+            sig = signature(info.node, info.resolver())
         except TranslationError:
             sig = None
-
     params = [n for n, _ in sig.params] if sig else [a.arg for a in info.node.args.args]
     helpers = module_functions(info)
     from apex.js.intent import js_hint, mine_js_tests, mine_jsdoc
@@ -347,6 +438,23 @@ def _analyze(target: str, ws: "Workspace | None" = None) -> _Analysis:
         mined = mine_jsdoc(info) + mine_js_tests(info) + mine_source(info)
     else:
         mined = mine_docstring(info) + mine_tests(info) + mine_source(info)
+    mined = mined + mine_references(info, params, ws.root if ws else None)
+    if sig is not None:
+        sig, why = _runtime_signature(info, sig, gap, purity, mined)
+        info.runtime_returns = sig.returns
+        if why is not None and model is not None:
+            model, gap = (
+                None,
+                Gap(
+                    reason_code=ReasonCode.FLOAT_SEMANTICS,
+                    explanation=f"Cannot model faithfully: {why}.",
+                    next_steps=[
+                        "Refutation and fuzzing run the real code on those values; Lean models "
+                        "exact integers only."
+                    ],
+                ),
+            )
+
     items: list[SpecItem] = []
     english = ws.english_specs(info) if ws else []
     for path in english:
@@ -368,10 +476,31 @@ def _analyze(target: str, ws: "Workspace | None" = None) -> _Analysis:
         mined,
         previous=previous,
     )
+    decisions: dict[str, DecisionView] = {}
     if ws is not None:
+        intent, decisions = _apply_decisions(intent, info, ws)
         ws.intent_path(info).parent.mkdir(parents=True, exist_ok=True)
         ws.intent_path(info).write_text(intent.model_dump_json(indent=2, by_alias=True) + "\n")
-    return _Analysis(info, purity, model, gap, intent, examples, sig, items, english)
+    return _Analysis(info, purity, model, gap, intent, examples, sig, items, english, decisions)
+
+
+def _apply_decisions(
+    intent: IntentModel, info: FunctionInfo, ws: "Workspace"
+) -> tuple[IntentModel, dict[str, DecisionView]]:
+    """A ruling that a behavior is intended outside a condition narrows its property to
+    `condition -> hint`; the views are what the report shows on each property."""
+    store = ws.decision_store
+    fid = function_id(info)
+    views: dict[str, DecisionView] = {}
+    props = []
+    for p in intent.properties:
+        view = store.view(fid, p.id, p.formal_hint)
+        if view is not None:
+            views[p.id] = view
+            if view.status == "intended" and view.when and p.formal_hint:
+                p = p.model_copy(update={"formal_hint": f"{view.when} -> {p.formal_hint}"})
+        props.append(p)
+    return intent.model_copy(update={"properties": props}), views
 
 
 def analyze(
@@ -436,7 +565,7 @@ def propose_intent(
 
 def model_file(model: LeanModel) -> str:
     return (
-        f"{FILE_HEADER}{OPTIONS}\n-- Generated by Apex {__version__} from the Python source. "
+        f"{FILE_HEADER}{OPTIONS}\n-- Generated by Apex {__version__} from the source code. "
         f"Do not edit: it is regenerated on every run.\n\nnamespace {model.namespace}\n\n"
         f"{model.text}\nend {model.namespace}\n"
     )
@@ -478,7 +607,7 @@ def _example_theorem(ex: Example, pid: str, model: LeanModel) -> str | None:
     except LiteralError:
         return None
     return (
-        f"/-- {pid}: {ex.text}  [{ex.source.type} {ex.source.loc}] -/\n"
+        f"/-- {comment_safe(f'{pid}: {ex.text}  [{ex.source.type} {ex.source.loc}]')} -/\n"
         f"theorem {pid} : {model.def_names[-1]} {args} = {expected} := by\n  sorry\n"
     )
 
@@ -518,7 +647,7 @@ def _drafts(a: _Analysis, floor: float, only: set[str] | None = None) -> list[tu
 def spec_skeleton(a: _Analysis, floor: float) -> str:
     info = a.info
     out = [
-        f"/-\nApex spec for {info.path}::{info.qualname}",
+        f"/-\nApex spec for {comment_safe(f'{info.path}::{info.qualname}')}",
         "Model: Model.lean in this folder (generated; read it, do not edit it).",
         "",
         "Each property is a theorem named after its ID (P1, P2, ...; E1, ... are examples).",
@@ -719,6 +848,23 @@ def _undeclared_result(prop: Property, floor: float, spec_path: Path) -> Propert
                 next_steps=["Confirm the intent in a spec, docstring or test to raise it."],
             ),
         )
+    if (
+        prop.kind == "equivalence"
+        and prop.formal_hint
+        and ("apex_reference" in prop.formal_hint or "apex_exact" in prop.formal_hint)
+    ):
+        return PropertyResult(
+            id=prop.id,
+            verdict=Verdict.UNPROVEN,
+            gap=Gap(
+                reason_code=ReasonCode.NO_STATEMENT,
+                explanation=f"Checked by running both implementations, not in Lean: {prop.text}",
+                next_steps=[
+                    "Run a fuzzing campaign (`apex fuzz`, or `apex check --fuzz N`) for "
+                    "recorded evidence; a disagreement refutes it."
+                ],
+            ),
+        )
     return PropertyResult(
         id=prop.id,
         verdict=Verdict.UNPROVEN,
@@ -749,7 +895,12 @@ def _apply_fuzz(results: dict[str, PropertyResult], a: _Analysis, ws: Workspace)
     hints = {p.id: p.formal_hint for p in a.intent.properties}
     for pid, p in list(results.items()):
         e = evidence.get(pid)
-        if e is None or e.function_sha256 != a.info.sha256 or e.hint != hints.get(pid):
+        if (
+            e is None
+            or e.function_sha256 != a.info.sha256
+            or e.hint != hints.get(pid)
+            or e.inputs != domains_digest(a.info.domains)
+        ):
             continue
         if e.found is not None:
             if p.verdict in FAILURE_VERDICTS:
@@ -765,7 +916,7 @@ def _apply_fuzz(results: dict[str, PropertyResult], a: _Analysis, ws: Workspace)
                     provenance=p.provenance,
                     fuzz=e,
                 )
-        elif e.executions > 0 and p.verdict in (Verdict.UNPROVEN, Verdict.OUT_OF_SCOPE):
+        elif e.executions > e.skipped and p.verdict in (Verdict.UNPROVEN, Verdict.OUT_OF_SCOPE):
             results[pid] = p.model_copy(update={"verdict": Verdict.FUZZED, "fuzz": e})
 
 
@@ -850,6 +1001,25 @@ def _tla_results(info: FunctionInfo, ws: Workspace) -> list[PropertyResult]:
                         reason_code=ReasonCode.MODEL_CHECK_FAILED,
                         explanation=r.error,
                         next_steps=["Fix the bundle and run `apex tla check` again."],
+                    ),
+                )
+            )
+        elif r.control_failure is not None:
+            out.append(
+                PropertyResult(
+                    id=pid,
+                    verdict=Verdict.UNPROVEN,
+                    review=review,
+                    model_check=e,
+                    gap=Gap(
+                        reason_code=ReasonCode.CONTROL_FAILED,
+                        explanation=f"{r.control_failure}: the invariant (or the spec) may be "
+                        "too weak to catch the bug the control describes, so a clean TLC run "
+                        "on the real design says little.",
+                        next_steps=[
+                            "Strengthen the invariant or the spec until the control fails as "
+                            "expected, then run `apex tla check` again."
+                        ],
                     ),
                 )
             )
@@ -970,10 +1140,12 @@ def _verify_function(
     if not wanted:
         result.gap = a.gap or NO_INTENT_GAP
         return result
+    withdrawn = {pid for pid, v in a.decisions.items() if v.status == "withdrawn"}
     refutable = [
         pid
         for pid in wanted
         if pid in props
+        and pid not in withdrawn
         and pid not in conflicted
         and (pid not in declared or _same_claim(declared[pid], props[pid], a))
     ]
@@ -1006,7 +1178,7 @@ def _verify_function(
         if refuted := run_refutation(set(refutable)):
             _apply_refutation(oos, refuted)
         _apply_fuzz(oos, a, ws)
-        result.properties = [oos[pid] for pid in wanted]
+        result.properties = _with_decisions([oos[pid] for pid in wanted], a, target_of(info))
         return result
 
     model = a.model
@@ -1137,8 +1309,53 @@ def _verify_function(
     if refuted := run_refutation(set(refutable) - settled):
         _apply_refutation(compiled, refuted)
     _apply_fuzz(compiled, a, ws)
-    result.properties = [compiled[pid] for pid in wanted]
+    result.properties = _with_decisions([compiled[pid] for pid in wanted], a, target_of(info))
     return result
+
+
+def target_of(info: FunctionInfo) -> str:
+    return f"{info.path}::{info.qualname}"
+
+
+def _with_decisions(
+    results: list[PropertyResult], a: _Analysis, target: str
+) -> list[PropertyResult]:
+    """Show each property's decision record; a withdrawn property becomes a WITHDRAWN gap."""
+    out = []
+    for p in results:
+        view = a.decisions.get(p.id)
+        if view is None:
+            out.append(p)
+            continue
+        if view.status == "withdrawn":
+            out.append(
+                PropertyResult(
+                    id=p.id,
+                    verdict=Verdict.UNPROVEN,
+                    review=p.review,
+                    decision=view,
+                    gap=Gap(
+                        reason_code=ReasonCode.WITHDRAWN,
+                        explanation=f"{view.decided_by} ruled that this property does not state "
+                        f"the intent" + (f": {view.ruling_note}" if view.ruling_note else "."),
+                        next_steps=["Remove it from its source, or state the intended rule."],
+                    ),
+                )
+            )
+            continue
+        update: dict = {"decision": view}
+        if view.status == "open" and p.verdict is Verdict.REFUTED and p.gap is None:
+            update["gap"] = Gap(
+                reason_code=ReasonCode.NEEDS_DECISION,
+                explanation=f"Waiting for a decision: {view.question}",
+                next_steps=[
+                    f"The owner rules in their terminal: `apex decide {target} {p.id} --bug`, "
+                    f'or `--intended --when "<where the property applies>"`, or `--intended` '
+                    "to withdraw it."
+                ],
+            )
+        out.append(p.model_copy(update=update))
+    return out
 
 
 def verify(
@@ -1420,7 +1637,7 @@ def _quick_refuted(a: _Analysis, spec: Spec, ws: Workspace) -> set[str]:
 # ---- check (engine mode: the full pipeline over files and packages) ---------------------------
 
 _SKIP_DIRS = {".git", ".apex", ".venv", "venv", "node_modules", "__pycache__", "build", "dist"}
-_SOURCE_SUFFIXES = {".py", ".ts", ".mts", ".cts", ".js", ".mjs", ".cjs"}
+_SOURCE_SUFFIXES = {".py", ".ts", ".mts", ".cts", ".tsx", ".js", ".mjs", ".cjs", ".jsx"}
 
 
 def _is_test_file(path: Path) -> bool:
@@ -1436,7 +1653,11 @@ def _is_test_file(path: Path) -> bool:
 
 
 def discover_targets(
-    paths: list[str], ws: Workspace, *, include_private: bool = False
+    paths: list[str],
+    ws: Workspace,
+    *,
+    include_private: bool = False,
+    skipped: list[tuple[str, str]] | None = None,
 ) -> list[str]:
     """`path::fn` targets for every function to check.
 
@@ -1444,8 +1665,12 @@ def discover_targets(
     type declarations (`.d.ts`), the config's `ignore` globs and tool directories. Private
     functions (`_name`) are skipped unless asked for: they are checked as part of the public
     functions that call them.
+
+    A file found by walking a directory that does not parse is left out and appended to
+    `skipped` as (path, reason), so one broken file does not stop a whole-project run. A file
+    named directly still fails the run (exit 3).
     """
-    from apex.analyze.target import TargetError, top_level_functions
+    from apex.analyze.target import TargetError, parses, top_level_functions
 
     out: list[str] = []
     for raw in paths:
@@ -1468,9 +1693,15 @@ def discover_targets(
         else:
             raise ApexToolError(f"no such file or directory: {raw}")
         for f in files:
+            walked = f is not path
             try:
+                if walked and not parses(f):
+                    raise TargetError(f"{f}: the file does not parse")
                 names = top_level_functions(f)
             except TargetError as e:
+                if walked and skipped is not None:
+                    skipped.append((str(f), str(e)))
+                    continue
                 raise ApexToolError(str(e)) from e
             out += [f"{f}::{n}" for n in names if include_private or not n.startswith("_")]
     return list(dict.fromkeys(out))
@@ -1519,7 +1750,11 @@ def check(
     from apex.llm.providers import ProviderError, get_provider
 
     deadline = time.monotonic() + timeout_s if timeout_s else None
-    targets = discover_targets(paths, ws, include_private=include_private)
+    skipped: list[tuple[str, str]] = []
+    targets = discover_targets(paths, ws, include_private=include_private, skipped=skipped)
+    if on_step:
+        for path, reason in skipped:
+            on_step(CheckStep(target=path, step="discover", detail=f"skipped: {reason}"))
     if not targets:
         raise ApexToolError("no functions to check under " + ", ".join(paths))
     llm = None
@@ -1705,3 +1940,92 @@ def review_status(target: str, ws: Workspace, spec_path: Path | None = None) -> 
             )
         )
     return ReviewStatus(target=target, spec_path=str(spec_path), statements=entries)
+
+
+# ---- references and decisions -----------------------------------------------------------------
+
+
+def add_reference(
+    target: str,
+    ws: Workspace,
+    *,
+    kind: Literal["function", "snapshot", "git", "exact"],
+    function: str | None = None,
+    rev: str = "HEAD",
+    when: str | None = None,
+    tolerance: float = 0,
+) -> "ReferenceResult":
+    from apex.analyze.target import TargetError
+    from apex.intent.references import add_reference as add
+
+    try:
+        return add(
+            target,
+            kind=kind,
+            function=function,
+            rev=rev,
+            when=when,
+            tolerance=tolerance,
+            root=ws.root,
+        )
+    except TargetError as e:
+        raise ApexToolError(str(e)) from e
+
+
+def _decided_property(target: str, ws: Workspace, pid: str) -> tuple[_Analysis, Property]:
+    a = _analyze(target, ws)
+    prop = next((p for p in a.intent.properties if p.id == pid), None)
+    if prop is None:
+        known = ", ".join(p.id for p in a.intent.properties) or "none"
+        raise ApexToolError(f"{target} has no property {pid} (it has: {known})")
+    view = a.decisions.get(pid)
+    if view is not None and view.status == "intended" and view.when and prop.formal_hint:
+        # the hint as its sources state it, without the condition the ruling added
+        prop = prop.model_copy(
+            update={"formal_hint": prop.formal_hint.removeprefix(f"{view.when} -> ")}
+        )
+    return a, prop
+
+
+def _last_counterexample(ws: Workspace, fid: str, pid: str) -> dict[str, str] | None:
+    if not ws.last_report.is_file():
+        return None
+    try:
+        report = Report.model_validate_json(ws.last_report.read_text())
+    except ValueError:
+        return None
+    for f in report.functions:
+        if f.qualname == fid:
+            for p in f.properties:
+                if p.id == pid and p.counterexample is not None:
+                    return p.counterexample.inputs
+    return None
+
+
+def ask_decision(target: str, ws: Workspace, pid: str, question: str, asked_by: str) -> "Decision":
+    """Record an open question on a property (anyone may ask; only a person may rule)."""
+    a, prop = _decided_property(target, ws, pid)
+    fid = function_id(a.info)
+    return ws.decision_store.ask(
+        fid, pid, prop.formal_hint, question, asked_by, _last_counterexample(ws, fid, pid)
+    )
+
+
+def rule_decision(
+    target: str,
+    ws: Workspace,
+    pid: str,
+    ruling: Literal["bug", "intended"],
+    decided_by: str,
+    when: str | None = None,
+    note: str | None = None,
+) -> "Decision":
+    a, prop = _decided_property(target, ws, pid)
+    if when is not None:
+        try:
+            parse_condition(when, a.params, a.helpers)
+        except HintError as e:
+            raise ApexToolError(f'--when "{when}": {e}') from e
+    return ws.decision_store.rule(
+        function_id(a.info), pid, prop.formal_hint, ruling, decided_by, when=when, note=note
+    )

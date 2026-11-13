@@ -29,7 +29,10 @@ from apex.core.report import FunctionResult, Report
 from apex.fidelity.fuzz import FuzzResult
 from apex.fidelity.refute import RefuteResult
 from apex.intent.proposals import ProposalCheck, ProposalSet
+from apex.intent.references import ReferenceResult
 from apex.report.explain import AdviceList, advise
+from apex.survey import Survey
+from apex.theorems.decisions import Decision
 from apex.tla.check import TlaCheckResult
 
 INSTRUCTIONS = """\
@@ -40,7 +43,13 @@ ask the user to run `apex review <target> --approve <ids>` in their own terminal
 approve). A `refuted` verdict carries an input on which the real Python breaks the property: fix
 the code or the intent, never the theorem. Typical loop: apex_analyze -> apex_intent_submit (if
 items need formal hints) -> apex_scaffold -> apex_prove -> write remaining proofs into the spec and
-apex_verify -> apex_refute -> apex_suggest."""
+apex_verify -> apex_refute -> apex_suggest.
+
+On an existing project, start with apex_survey: it lists what Apex cannot read from the code
+(types of untyped functions, the values a field takes, which numbers are money, time zones). Find
+those facts in the project and write them to apex.profile.toml. Before a refactor, take a
+apex_reference_add snapshot; after it, apex_refute shows where old and new disagree. When a
+counterexample might be intended behavior, apex_decision_ask records the question for the owner."""
 
 _lock = threading.Lock()
 
@@ -230,6 +239,63 @@ def build_server() -> MCPServer:
         """Next steps for everything not proven in the last report, with a regression test that
         replays each counterexample."""
         return _run(lambda: _advice("suggest", target, properties))
+
+    @server.tool()
+    def apex_survey(paths: list[str]) -> Survey:
+        """Start here on an existing project. Per function: why it is not checkable yet and what
+        would unblock it, with clues from the code (fields read, literals compared, money and
+        date use), plus a drafted apex.profile.toml. Find out the project facts the TODOs ask
+        for (schema, forms, tests, docs), write apex.profile.toml (signatures for untyped
+        functions, input domains, time zones), and survey again until it is clean. The clues are
+        evidence, not answers: never fill a TODO from the clue alone."""
+        from apex.survey import survey
+
+        return _run(lambda: survey(paths, _ws()))
+
+    @server.tool()
+    def apex_reference_add(
+        target: str,
+        kind: Literal["snapshot", "git", "function", "exact"],
+        function: str | None = None,
+        rev: str = "HEAD",
+        when: str | None = None,
+        tolerance: float = 0,
+    ) -> ReferenceResult:
+        """Add a reference property: the function must agree with another implementation or
+        with exact arithmetic. Before refactoring or extracting code, `snapshot` (or `git` REV)
+        saves the current version; after the change, apex_refute / apex_fuzz show any input
+        where old and new disagree. `exact`: the same code on exact rationals (float drift in
+        money code; set `tolerance`, e.g. 0.005). `when`: a condition on the inputs where the
+        reference applies (a decided exception). Evidence, never proof."""
+        from apex import pipeline
+
+        return _run(
+            lambda: pipeline.add_reference(
+                target,
+                _ws(),
+                kind=kind,
+                function=function,
+                rev=rev,
+                when=when,
+                tolerance=tolerance,
+            )
+        )
+
+    @server.tool()
+    def apex_decision_ask(target: str, property_id: str, question: str) -> Decision:
+        """Record a question for the owner when a counterexample may be intended behavior (is a
+        negative total allowed? is a one-cent difference acceptable?). The verdict does not
+        change. Only the owner can rule, in their terminal: `apex decide <target> <id> --bug`
+        or `--intended [--when "<condition>"]`. Ask, do not guess, and never edit
+        .apex/decisions.json."""
+        from apex import pipeline
+        from apex.theorems.review import current_reviewer
+
+        return _run(
+            lambda: pipeline.ask_decision(
+                target, _ws(), property_id, question, f"agent ({current_reviewer()})"
+            )
+        )
 
     @server.tool()
     def apex_review_status(target: str) -> ReviewStatus:

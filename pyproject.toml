@@ -14,7 +14,9 @@ dependencies = [
     "hypothesis>=6.100",
     "crosshair-tool>=0.0.80",
     "mcp>=2.3",
-    "tree-sitter>=0.26.0",
+    # 0.26.0 corrupts memory through Node.start_point / end_point (segfaults during GC on
+    # real-world files); 0.25.2 is clean. Re-test before lifting the cap.
+    "tree-sitter>=0.25.2,<0.26",
     "tree-sitter-typescript>=0.23.2",
 ]
 

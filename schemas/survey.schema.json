@@ -1,0 +1,170 @@
+{
+  "$defs": {
+    "FunctionSurvey": {
+      "properties": {
+        "asks": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Asks",
+          "type": "array"
+        },
+        "params": {
+          "items": {
+            "$ref": "#/$defs/ParamClue"
+          },
+          "title": "Params",
+          "type": "array"
+        },
+        "reason": {
+          "title": "Reason",
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "checkable",
+            "needs_signature",
+            "needs_intent",
+            "float_code",
+            "not_exported",
+            "ui",
+            "impure",
+            "unsupported"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "target": {
+          "title": "Target",
+          "type": "string"
+        }
+      },
+      "required": [
+        "target",
+        "status",
+        "reason"
+      ],
+      "title": "FunctionSurvey",
+      "type": "object"
+    },
+    "ParamClue": {
+      "properties": {
+        "compared_to": {
+          "additionalProperties": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "array"
+          },
+          "title": "Compared To",
+          "type": "object"
+        },
+        "fields": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Fields",
+          "type": "array"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Type"
+        },
+        "used_as": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Used As",
+          "type": "array"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "title": "ParamClue",
+      "type": "object"
+    }
+  },
+  "properties": {
+    "counts": {
+      "additionalProperties": {
+        "type": "integer"
+      },
+      "title": "Counts",
+      "type": "object"
+    },
+    "functions": {
+      "items": {
+        "$ref": "#/$defs/FunctionSurvey"
+      },
+      "title": "Functions",
+      "type": "array"
+    },
+    "profile": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Profile"
+    },
+    "profile_draft": {
+      "default": "",
+      "title": "Profile Draft",
+      "type": "string"
+    },
+    "profile_problems": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Profile Problems",
+      "type": "array"
+    },
+    "root": {
+      "title": "Root",
+      "type": "string"
+    },
+    "skipped_files": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Skipped Files",
+      "type": "array"
+    },
+    "stack": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Stack",
+      "type": "array"
+    }
+  },
+  "required": [
+    "root"
+  ],
+  "title": "Survey",
+  "type": "object"
+}

@@ -252,7 +252,8 @@
             "test",
             "spec",
             "source",
-            "inferred"
+            "inferred",
+            "reference"
           ],
           "title": "Type",
           "type": "string"

@@ -21,6 +21,15 @@ from apex.intent.hints import Hint, HintError, parse_condition, parse_hint
 from apex.translate.lean import LeanModel, PropTranslator, TranslationError, lean_ident
 
 
+def comment_safe(text: str) -> str:
+    """Text that can sit inside a Lean comment without ending it or opening a nested one.
+
+    Lean block comments nest: a stray `/-` (a path like `/tmp/-x/m.py`, or English such as
+    "a/-b") opens a comment that never closes and silently comments out the rest of the file.
+    """
+    return text.replace("/-", "/ -").replace("-/", "- /")
+
+
 class DraftError(ValueError):
     pass
 
@@ -142,7 +151,7 @@ def draft_statement(
         binders.append(f"({v} : {sig.returns.args[0].lean()})")
         hyps.append(f"({_fresh('h', taken)} : {call_text} = some {v})")
     head = "".join(f" {b}" for b in [*binders, *hyps] if b)
-    doc = " ".join(doc.split()).replace("-/", "- /")
+    doc = comment_safe(" ".join(doc.split()))
     return Draft(pid, f"/-- {doc} -/\ntheorem {pid}{head} :\n    {conclusion} := by\n  sorry\n")
 
 

@@ -247,7 +247,9 @@ def fuzz_target_source(
     bigint = info.numeric == {"bigint"}
     names = [n for n, _ in params]
     consume = ", ".join(_consume(t, bigint) for _, t in params)
-    module_url = Path(info.path).resolve().as_uri()
+    from apex.js.runner import runnable_path
+
+    module_url = runnable_path(Path(info.path)).resolve().as_uri()
     require_root = (jazzer_home() / "package.json").as_posix()
     return f"""import {{ createRequire }} from "node:module";
 import fs from "node:fs";

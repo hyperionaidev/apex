@@ -49,6 +49,11 @@ class FuzzEvidence(_Strict):
     """Inputs left out because the Python hit its recursion limit or the per-call budget."""
     found: Counterexample | None = None
     note: str | None = None
+    inputs: str | None = None
+    """Identity of the input domains from apex.profile.toml the campaign drew from (None: the
+    parameters' types only); the evidence is stale once they change."""
+    time_zones: list[str] = Field(default_factory=list)
+    """The time zones the campaign ran in (date code, with a profile that names them)."""
 
 
 class ModelCheckEvidence(_Strict):
@@ -73,6 +78,8 @@ class ModelCheckEvidence(_Strict):
     rejected_trace: list[dict[str, str]] | None = None
     """A recorded trace the spec does not allow (the spec does not describe this code)."""
     note: str | None = None
+    controls: list[str] = Field(default_factory=list)
+    """Each control configuration that names this invariant, and what TLC found on it."""
 
 
 class LeanError(_Strict):
@@ -99,6 +106,17 @@ class Provenance(_Strict):
     proof_by: str | None = None
 
 
+class DecisionView(_Strict):
+    """What the report shows on a property."""
+
+    status: Literal["open", "bug", "intended", "withdrawn", "lapsed"]
+    question: str | None = None
+    ruling_note: str | None = None
+    when: str | None = None
+    decided_by: str | None = None
+    decided_at: datetime | None = None
+
+
 class PropertyResult(_Strict):
     id: str
     verdict: Verdict
@@ -113,6 +131,8 @@ class PropertyResult(_Strict):
     provenance: Provenance = Field(default_factory=Provenance)
     fuzz: FuzzEvidence | None = None
     model_check: ModelCheckEvidence | None = None
+    decision: DecisionView | None = None
+    """An open question on this property, or a person's ruling on it (`apex decide`)."""
 
     @model_validator(mode="after")
     def _verdict_shape(self) -> Self:

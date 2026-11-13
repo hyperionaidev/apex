@@ -54,8 +54,8 @@ def test_hint_result_name_moves_when_a_parameter_is_called_r() -> None:
     [
         "r.bit_length() > 0",  # attribute access
         "open('x') == r",  # calls outside the allowlist
-        "r == 'a'",  # strings
-        "r == 1.5",  # floats
+        "r.__class__ == x",  # dunder fields
+        "r._cache == x",  # private fields
         "q > 0",  # unknown name
         "r == x ** 100000",  # unbounded exponent
         "__import__('os')",  # dunder
@@ -65,6 +65,16 @@ def test_hint_result_name_moves_when_a_parameter_is_called_r() -> None:
 def test_hint_rejects_unsafe_or_unknown(hint: str) -> None:
     with pytest.raises(HintError):
         parse_hint(hint, ["x"])
+
+
+def test_hints_take_strings_floats_and_record_fields() -> None:
+    h = parse_hint("inv.status == 'paid' -> abs(r - inv.amount / 3) <= 0.005", ["inv"])
+    assert h.text == "inv.status == 'paid' -> abs(r - inv.amount / 3) <= 0.005"
+    from apex.fidelity.values import JsRecord
+
+    inv = JsRecord(status="paid", amount=1.0)
+    assert holds(h, {"inv": inv, "r": 0.333}) is True
+    assert holds(h, {"inv": inv, "r": 0.34}) is False
 
 
 def test_precondition_may_not_mention_result_or_imply() -> None:
@@ -282,7 +292,7 @@ def test_check_proposals_rejects_invalid_hints_and_unknown_items() -> None:
     proposals = ProposalSet(
         properties=[
             ProposedProperty(text="ok", formal_hint="r >= 0", basis="source"),
-            ProposedProperty(text="bad", formal_hint="r.real >= 0", basis="source"),
+            ProposedProperty(text="bad", formal_hint="r._real >= 0", basis="source"),
             ProposedProperty(item="S9", text="no item", formal_hint="r >= 0", basis="spec"),
         ]
     )

@@ -53,15 +53,14 @@ from apex.fidelity.bridge import (
     FidelityError,
     OutsideSafeIntegersError,
     call_user,
-    ints_for,
     load_module,
-    strategy_for,
+    params_strategy,
     unbounded_int_digits,
 )
+from apex.fidelity.values import TZ_KEY, same_value, show, time_zone, uses_dates
 from apex.intent.candidates import Example
 from apex.intent.fuse import module_functions
 from apex.intent.hints import Hint, HintError, HintEvalError, evaluate, parse_condition, parse_hint
-from apex.translate.literals import normalize
 
 HYPOTHESIS_EXAMPLES = 300
 # Mostly small integers, where boundary bugs live, and some large ones. Unbounded integers would
@@ -131,11 +130,12 @@ def _violation(
             return None
         if not all(evaluate(p, env, ns) for p in c.hint.premises if not _mentions(p, c.hint)):
             return None
-    except HintEvalError:
+    except HintEvalError as e:
+        c.note = c.note or f"skipped inputs on which a premise could not be evaluated ({e})"
         return None
     value, error = _call(fn, args)
     c.calls += 1
-    inputs = {k: repr(v) for k, v in env.items()}
+    inputs = {k: show(v) for k, v in env.items()}
     if error in RESOURCE_LIMITS:
         c.slow += error == TIMED_OUT
         c.skipped += 1
@@ -151,9 +151,13 @@ def _violation(
             c.hint.conclusion, env, ns
         ):
             return Counterexample(
-                inputs=inputs, expected=c.hint.text, actual=f"returns {value!r}", found_by=by
+                inputs=inputs, expected=c.hint.text, actual=f"returns {show(value)}", found_by=by
             )
-    except HintEvalError:
+    except HintEvalError as e:
+        # Nothing to compare on this input (a reference that raised, exact arithmetic that
+        # cannot run it): skipped and counted, so a campaign never claims inputs it did not check.
+        c.skipped += 1
+        c.note = c.note or f"skipped inputs the property could not be evaluated on ({e})"
         return None
     return None
 
@@ -176,8 +180,8 @@ def _mentions(e: ast.expr, h: Hint) -> bool:
 
 def _example_check(pid: str, ex: Example, fn: Any, names: list[str]) -> PropertyRefutation:
     value, error = _call(fn, ex.args)
-    inputs = {k: repr(v) for k, v in zip(names, ex.args, strict=True)}
-    if error is None and normalize(value) == normalize(ex.expected):
+    inputs = {k: show(v) for k, v in zip(names, ex.args, strict=True)}
+    if error is None and same_value(value, ex.expected):
         return PropertyRefutation(id=pid, refuted=False, searched_by=["example"])
     if error in RESOURCE_LIMITS:
         return PropertyRefutation(
@@ -202,7 +206,7 @@ def _hypothesis(
     params: list[tuple[str, PyType]],
     ns: dict[str, Any],
     n: int,
-    ints: "st.SearchStrategy[int] | None" = None,
+    strategy: "st.SearchStrategy[tuple[Any, ...]]",
 ) -> None:
     names = [p for p, _ in params]
     found: list[Counterexample] = []
@@ -217,14 +221,15 @@ def _hypothesis(
         deadline=None,
         suppress_health_check=SUPPRESSED_HEALTH_CHECKS,
     )
-    @given(st.tuples(*(strategy_for(t, ints) for _, t in params)))
+    @given(strategy)
     def search(args: tuple[Any, ...]) -> None:
         cx = _violation(c, fn, names, args, ns, "hypothesis")
         if cx is not None:
             found.append(cx)  # Hypothesis replays the shrunk example last
             raise _Broken
 
-    c.searched.append("hypothesis")
+    if "hypothesis" not in c.searched:
+        c.searched.append("hypothesis")
     try:
         search()
     except _Broken:
@@ -320,6 +325,13 @@ def _crosshair(
         c.found = _violation(c, fn, names, args, ns, "crosshair")
 
 
+def zones_for(info: FunctionInfo, params: list[tuple[str, PyType]]) -> list[str]:
+    """The profile's time zones, for a function whose behavior can depend on them."""
+    if not info.timezones or not uses_dates(info, [t for _, t in params]):
+        return []
+    return list(info.timezones)
+
+
 @dataclass
 class CheckTarget:
     """The real function, its module's helpers, and one check per property with a hint."""
@@ -331,6 +343,8 @@ class CheckTarget:
     """Example properties, which are checked by running the one input they state."""
     skipped: dict[str, PropertyRefutation]
     """Properties with nothing to check, each with the reason."""
+    module: Any = None
+    """The loaded module (Python classes the generators construct)."""
 
 
 def load_checks(
@@ -342,13 +356,20 @@ def load_checks(
     fn = getattr(module, info.qualname)
     ns = {h: getattr(module, h) for h in module_functions(info) if hasattr(module, h)}
     helpers = set(ns)
+    if any(
+        p.formal_hint and ("apex_reference" in p.formal_hint or "apex_exact" in p.formal_hint)
+        for p in intent.properties
+    ):
+        from apex.intent.references import bind
+
+        ns.update(bind(info, fn))
     conflicted = {pid for c in intent.conflicts for pid in c.property_ids}
     pres: list[ast.expr] = []
     for c in intent.preconditions:
         if c.formal_hint:
             with contextlib.suppress(HintError):
                 pres.append(parse_condition(c.formal_hint, names, helpers))
-    out = CheckTarget(fn=fn, ns=ns, checks=[], examples=[], skipped={})
+    out = CheckTarget(fn=fn, ns=ns, checks=[], examples=[], skipped={}, module=module)
     for p in intent.properties:
         if ids is not None and p.id not in ids:
             continue
@@ -406,13 +427,22 @@ def refute(
             else PropertyRefutation(id=pid, refuted=False, note="the example's input is unknown")
         )
 
+    strategy = params_strategy(info, params, target.module)
+    zones = zones_for(info, params)
     for c in checks:
         # Examples double as cheap targeted inputs for every property.
         for ex in examples.values():
             if c.found is None and len(ex.args) == len(names):
                 c.found = _violation(c, fn, names, ex.args, ns, "example")
         if c.found is None:
-            _hypothesis(c, fn, params, ns, hypothesis_n, ints_for(info))
+            for tz in zones or [None]:
+                with time_zone(tz):
+                    n = max(hypothesis_n // len(zones), 50) if zones else hypothesis_n
+                    _hypothesis(c, fn, params, ns, n, strategy)
+                if c.found is not None:
+                    if tz is not None:
+                        c.found.inputs[TZ_KEY] = tz
+                    break
     wanted = crosshair_ids if crosshair_ids is not None else {c.pid for c in checks}
     _crosshair(
         [c for c in checks if c.found is None and c.pid in wanted], info, params, fn, ns, budget_s

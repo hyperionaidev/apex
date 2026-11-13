@@ -18,7 +18,9 @@ functions defined in the target's own module.
 
 import ast
 import builtins
+import math
 from dataclasses import dataclass
+from fractions import Fraction
 from typing import Any
 
 RESULT_NAMES = ("r", "result", "__return__")
@@ -38,7 +40,65 @@ def _tdiv(a: int, b: int) -> int:
 JS_INT_OPS = {"__apex_tmod__": _tmod, "__apex_tdiv__": _tdiv}
 """What the JS lowering writes for `%` and `Math.trunc(a / b)`, so hints on JS code mean what
 JavaScript means (and the translator gives them Lean's Int.tmod / Int.tdiv)."""
-BUILTINS = frozenset({"all", "any", "len", "abs", "min", "max", "sum", "range", *JS_INT_OPS})
+
+
+def _js_round(x: Any) -> Any:
+    """JavaScript's `Math.round`: halves go up (toward +infinity), on floats and exact numbers."""
+    if isinstance(x, Fraction | int):
+        return math.floor(x + Fraction(1, 2))
+    if not math.isfinite(x):
+        return x
+    r = math.floor(x)
+    return r + 1 if x - r >= 0.5 else r
+
+
+def _close(a: Any, b: Any, tol: Any = 0) -> bool:
+    """`a` and `b` are the same value, numbers within `tol` of each other (element-wise in lists,
+    tuples and records). NaN equals NaN, so a reference that also returns NaN agrees."""
+    if isinstance(a, bool) or isinstance(b, bool):
+        return isinstance(a, bool) and isinstance(b, bool) and a == b
+    if isinstance(a, int | float | Fraction) and isinstance(b, int | float | Fraction):
+        if isinstance(a, float) and isinstance(b, float) and math.isnan(a) and math.isnan(b):
+            return True
+        if (isinstance(a, float) and not math.isfinite(a)) or (
+            isinstance(b, float) and not math.isfinite(b)
+        ):
+            return a == b
+        return abs(Fraction(a) - Fraction(b)) <= Fraction(tol)
+    if isinstance(a, list | tuple) and isinstance(b, list | tuple):
+        return len(a) == len(b) and all(_close(x, y, tol) for x, y in zip(a, b, strict=True))
+    if isinstance(a, dict) and isinstance(b, dict):
+        return a.keys() == b.keys() and all(_close(a[k], b[k], tol) for k in a)
+    return a == b
+
+
+def _is_integer(x: Any) -> bool:
+    return (
+        isinstance(x, int | Fraction | float)
+        and not isinstance(x, bool)
+        and (x == math.floor(x) if not isinstance(x, float) or math.isfinite(x) else False)
+    )
+
+
+VALUE_OPS = {
+    "apex_round": _js_round,
+    "apex_floor": math.floor,
+    "apex_ceil": math.ceil,
+    "apex_trunc": math.trunc,
+    "apex_is_integer": _is_integer,
+    "apex_close": _close,
+}
+"""Helpers for hints on runnable values: JS `Math.round`, `Math.floor`, `Math.ceil`,
+`Math.trunc` and `Number.isInteger` as JavaScript means them, and `apex_close(a, b, tol)`."""
+
+REFERENCE_OPS = frozenset({"apex_reference", "apex_exact"})
+"""Bound per target when it has a reference (see apex.intent.references): `apex_reference(...)`
+runs the reference implementation, `apex_exact(...)` the same code in exact arithmetic."""
+
+BUILTINS = frozenset(
+    {"all", "any", "len", "abs", "min", "max", "sum", "range", *JS_INT_OPS, *VALUE_OPS}
+    | REFERENCE_OPS
+)
 
 _ALLOWED = (
     ast.Expression,
@@ -54,6 +114,7 @@ _ALLOWED = (
     ast.Sub,
     ast.Mult,
     ast.FloorDiv,
+    ast.Div,
     ast.Mod,
     ast.Pow,
     ast.Compare,
@@ -80,6 +141,7 @@ _ALLOWED = (
     ast.GeneratorExp,
     ast.ListComp,
     ast.comprehension,
+    ast.Attribute,
 )
 
 
@@ -155,8 +217,14 @@ def _check(node: ast.expr, allowed_names: set[str], callables: set[str]) -> None
     for n in ast.walk(node):
         if not isinstance(n, _ALLOWED):
             raise HintError(f"`{type(n).__name__}` is not allowed in a formal hint")
-        if isinstance(n, ast.Constant) and not (n.value is None or isinstance(n.value, bool | int)):
-            raise HintError(f"literal {n.value!r} is not allowed (integers, booleans, None only)")
+        if isinstance(n, ast.Constant) and not (
+            n.value is None or isinstance(n.value, bool | int | float | str)
+        ):
+            raise HintError(
+                f"literal {n.value!r} is not allowed (numbers, strings, booleans, None)"
+            )
+        if isinstance(n, ast.Attribute) and n.attr.startswith("_"):
+            raise HintError(f"field `{n.attr}` is not allowed (no names starting with `_`)")
         if isinstance(n, ast.BinOp) and isinstance(n.op, ast.Pow):
             k = n.right
             if not (isinstance(k, ast.Constant) and type(k.value) is int and 0 <= k.value <= 64):
@@ -212,9 +280,15 @@ def parse_condition(
     return h.conclusion
 
 
-_SAFE_BUILTINS = {
-    name: getattr(builtins, name) for name in BUILTINS if name not in JS_INT_OPS
-} | JS_INT_OPS
+_SAFE_BUILTINS = (
+    {
+        name: getattr(builtins, name)
+        for name in BUILTINS
+        if name not in JS_INT_OPS and name not in VALUE_OPS and name not in REFERENCE_OPS
+    }
+    | JS_INT_OPS
+    | VALUE_OPS
+)
 
 
 def evaluate(expr: ast.expr, env: dict[str, Any], helpers: dict[str, Any] | None = None) -> bool:

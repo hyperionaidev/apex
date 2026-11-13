@@ -53,3 +53,6 @@ export function isqrt(n: number): number {
 }
 
 export const _keep = hidden;
+// Not exported, and changed when the module loads, so not even Apex's import-free copy of the
+// module can run it.
+(hidden as any).calls = 0;
