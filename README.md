@@ -904,6 +904,9 @@ tests/           unit, Lean, installation, TLA+ and JavaScript tests; canaries; 
 | 7 | JavaScript and TypeScript: conversion to the shared subset, Node.js bridge, JSDoc, Jest and fast-check intent, Jazzer.js |
 | 8 | App code: JSX, bundler modules, runnable types, project profile and survey, reference properties (refactors, exact arithmetic), decision records, TLA+ controls |
 | 9 | A larger Lean subset (early exits from loops, `while` loops and recursion with checked termination measures, indexing and slices, guard clauses, truthiness, `Optional` narrowing, more builtins) and proof work handed to the coding agent (proof tasks, goal states, Lean scratch commands, termination measures) |
+| 10 | App code formalized with the coding agent: profile domains on record fields, runtime types and domains in the formalization prompt, hints for float code, `apex_dec` for exact money values |
+
+The full list of changes is in [CHANGELOG.md](CHANGELOG.md).
 
 ## License
 
