@@ -1,3 +1,5 @@
+import subprocess
+
 import pytest
 
 from apex.lean.project import LeanProject, LeanUnavailable
@@ -20,5 +22,14 @@ def lean_project() -> LeanProject:
     except LeanUnavailable as e:
         pytest.skip(f"Lean unavailable: {e}")
     if not project.prelude_built:
-        pytest.skip("Apex prelude not built; run `apex init`")
+        # In a source checkout a pull or merge makes Prelude.lean newer than its .olean even when
+        # nothing changed; Lake rebuilds by content, so building is cheap when it is current.
+        # Skipping instead would hide every Lean test behind a green run.
+        try:
+            lake = project.require_lake()
+        except LeanUnavailable as e:
+            pytest.skip(f"Apex prelude not built and no lake: {e}")
+        if subprocess.run([str(lake), "build", "Apex"], cwd=project.root).returncode != 0:
+            pytest.fail("`lake build Apex` failed: the Lean prelude does not compile")
+        project.mark_prelude_built()
     return project

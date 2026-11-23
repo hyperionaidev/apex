@@ -129,11 +129,14 @@ class Profile(_Strict):
         return None
 
     def domain_for(self, path: Path, qualname: str, param: str) -> Domain | None:
+        """The first domain matching `param`, a parameter name or the path of a record field
+        inside one (`args.amount`; a bare pattern then names the field: `amount`)."""
         full = f"{self._key(path, qualname)}.{param}"
         local = f"{qualname}.{param}"
+        name = param.rsplit(".", 1)[-1]
         for d in self.domains:
             for pat in d.params:
-                subject = full if "::" in pat else local if "." in pat else param
+                subject = full if "::" in pat else local if "." in pat else name
                 if fnmatch.fnmatchcase(subject, pat.removeprefix("./")):
                     return d
         return None

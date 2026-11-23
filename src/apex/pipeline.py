@@ -20,11 +20,11 @@ from pydantic import BaseModel
 from apex import __version__
 from apex.analyze.purity import PurityResult, classify
 from apex.analyze.target import FunctionInfo, load_function
-from apex.analyze.types import FLOAT, map_ints
+from apex.analyze.types import FLOAT, PyType, map_ints
 from apex.core.config import ApexConfig
 from apex.core.hashing import sha256_text
 from apex.core.intent import Conflict, IntentModel, Property
-from apex.core.profile import domains_digest
+from apex.core.profile import current_profile, domains_digest
 from apex.core.report import (
     FunctionResult,
     FuzzEvidence,
@@ -382,6 +382,41 @@ def _runs_privately(info: FunctionInfo) -> bool:
         return False
 
 
+def _field_domains(info: FunctionInfo, param: str, t: PyType) -> tuple[PyType, str | None]:
+    """Record the profile's domains for the record fields inside parameter `param` (keyed by
+    their path, `args.amount`) and make the ones with a decimal or float domain floats."""
+    if not any(x.kind == "record" for x in t.walk()):
+        return t, None
+    profile = current_profile(info.path.parent)
+    why: list[str] = []
+
+    def go(path: str, ty: PyType) -> PyType:
+        if ty.kind == "record":
+            args = []
+            for n, a in zip(ty.names, ty.args, strict=True):
+                p = f"{path}.{n}"
+                d = profile.domain_for(info.path, info.qualname, p)
+                if d is not None:
+                    info.domains[p] = d
+                    if d.kind in ("decimal", "float") and any(x.kind == "int" for x in a.walk()):
+                        a = map_ints(a, FLOAT)
+                        why.append(f"`{p}` ({d.describe()})")
+                args.append(go(p, a))
+            return replace(ty, args=tuple(args))
+        if ty.args:  # list elements, optional values and dict values keep the path
+            return replace(ty, args=tuple(go(path, a) for a in ty.args))
+        return ty
+
+    out = go(param, t)
+    note = (
+        f"apex.profile.toml gives the record fields {', '.join(why)} decimal domains, so they "
+        "are floats"
+        if why
+        else None
+    )
+    return out, note
+
+
 def _runtime_signature(
     info: FunctionInfo, sig: FunctionSig, gap: Gap | None, purity: PurityResult, mined: Mined
 ) -> tuple[FunctionSig, str | None]:
@@ -418,6 +453,8 @@ def _runtime_signature(
             )
         elif float_code and (decimal_example or exact_ref) and not (d and d.kind == "int"):
             t = map_ints(t, FLOAT)
+        t, field_why = _field_domains(info, name, t)
+        why = why or field_why
         params.append((name, t))
     returns = map_ints(sig.returns, FLOAT) if float_code else sig.returns
     return FunctionSig(params, returns), why
@@ -598,7 +635,7 @@ def propose_intent(
     a = _analyze(target, ws)
     try:
         llm = get_provider(ws.config, provider)
-        proposals = propose(llm, a.info, a.intent, a.spec_items, from_source=from_source)
+        proposals = propose(llm, a.info, a.intent, a.spec_items, from_source=from_source, sig=a.sig)
     except ProviderError as e:
         raise ApexToolError(str(e)) from e
     return submit_proposals(target, ws, proposals)
@@ -999,6 +1036,23 @@ def _conflict_result(pid: str, c: Conflict, base: dict) -> PropertyResult:
     )
 
 
+def _out_of_scope_gap(prop: Property | None, a: "_Analysis") -> Gap | None:
+    """Why a property of a function Lean cannot model has no verdict yet. Without a formal hint,
+    the missing hint is what stops it (refutation and fuzzing need one too), not the model."""
+    if prop is None or prop.formal_hint or prop.kind == "example":
+        return a.gap
+    outside = f" The function is also outside Lean ({a.gap.reason_code})." if a.gap else ""
+    return Gap(
+        reason_code=ReasonCode.SPEC_AMBIGUOUS,
+        explanation=f"Not machine-checkable yet: {prop.text}{outside}",
+        next_steps=[
+            "Add a formal hint in backticks to the spec item, or run `apex intent propose` "
+            "(model) / `apex intent submit` (agent) to formalize it; refutation and fuzzing "
+            "then run it on the real code.",
+        ],
+    )
+
+
 def _undeclared_result(prop: Property, floor: float, spec_path: Path) -> PropertyResult:
     if not prop.formal_hint:
         return PropertyResult(
@@ -1348,7 +1402,9 @@ def _verify_function(
             oos[pid] = (
                 _conflict_result(pid, conflicted[pid], {"id": pid})
                 if pid in conflicted
-                else PropertyResult(id=pid, verdict=Verdict.OUT_OF_SCOPE, gap=a.gap)
+                else PropertyResult(
+                    id=pid, verdict=Verdict.OUT_OF_SCOPE, gap=_out_of_scope_gap(props.get(pid), a)
+                )
             )
         # No model to prove things about, but the real Python can still be refuted or fuzzed.
         if refuted := run_refutation(set(refutable)):
@@ -2230,7 +2286,9 @@ def check(
         _check_deadline(deadline)
         a = _analyze(target, ws)
         needs_hints = any(p.kind != "example" and not p.formal_hint for p in a.intent.properties)
-        if llm is not None and needs_hints and a.purity.class_ == "pure" and a.sig is not None:
+        # Float code is "impure" for Lean but safe to run: its English still needs hints, for
+        # refutation and fuzzing.
+        if llm is not None and needs_hints and safe_to_run(a.purity) and a.sig is not None:
             try:
                 proposed = propose_intent(target, ws, provider=provider)
             except ApexToolError as e:

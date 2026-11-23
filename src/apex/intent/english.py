@@ -33,6 +33,7 @@ TEXT_ONLY_CONFIDENCE = 0.5
 _ITEM = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+(?P<body>.+?)\s*$")
 _HEADING = re.compile(r"^\s*#{1,6}\s+(?P<title>.+?)\s*$")
 _TRAILING_HINT = re.compile(r"`(?P<hint>[^`]+)`\s*$")
+_LOOKS_LIKE_HINT = re.compile(r"==|!=|<=|>=|->|=>|\bresult\b|\br\b|[<>]")
 _PRE = re.compile(r"^(?:requires|precondition|pre|assumes?)\s*:\s*", re.I)
 
 
@@ -51,7 +52,22 @@ def _section(lines: list[str], qualname: str) -> list[tuple[int, str]]:
     if not headings:
         return list(enumerate(lines))
     word = re.compile(rf"(?<![\w.]){re.escape(qualname)}(?!\w)")
-    mine = [k for k, title in headings if word.search(title.replace("`", ""))]
+
+    def depth(k: int) -> int:
+        return len(lines[k]) - len(lines[k].lstrip().lstrip("#"))
+
+    # A file title (`# Contracts: English spec`, alone at its level above the function sections)
+    # names the module, not a function: a function that shares the module's name (a React
+    # component) must not inherit every item in the file.
+    top = min(depth(k) for k, _ in headings)
+    title = (
+        headings[0][0]
+        if len(headings) > 1
+        and sum(depth(k) == top for k, _ in headings) == 1
+        and depth(headings[0][0]) == top
+        else None
+    )
+    mine = [k for k, t in headings if k != title and word.search(t.replace("`", ""))]
     if not mine:
         return []
     start = mine[0]
@@ -96,17 +112,22 @@ def mine_english(
     items = spec_items(path.read_text(), qualname)
     out = []
     for it in items:
-        hint = it.hint
+        hint, text = it.hint, it.text
         if hint is not None:
             try:
                 hint = convert(hint) if convert else hint
                 parse_hint(hint, params, helpers)
-            except (HintError, ValueError):
-                hint = None  # backticked text that is not a hint is just emphasis
+            except (HintError, ValueError) as e:
+                # Backticked text that is not a hint is just emphasis; one that reads like a
+                # hint was meant as one, and whoever wrote it needs to know why it is unused.
+                if _LOOKS_LIKE_HINT.search(it.hint or ""):
+                    text = f"{text} (hint `{it.hint}` not used: {e})"
+                    it.text = text
+                hint = None
         out.append(
             Candidate(
                 kind="precondition" if it.is_precondition else "property",
-                text=it.text,
+                text=text,
                 hint=hint,
                 source=Source(type="spec", loc=f"{path.name}:{it.line}"),
                 confidence=FORMAL_CONFIDENCE if hint else TEXT_ONLY_CONFIDENCE,

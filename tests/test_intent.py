@@ -342,3 +342,27 @@ def test_draft_binds_only_what_the_claim_uses(tmp_path: Path) -> None:
 
 def test_empty_mined_is_an_identity() -> None:
     assert (EMPTY + EMPTY).examples == []
+
+
+def test_a_spec_file_title_is_not_a_function_heading() -> None:
+    # `Contracts.js` defines a `Contracts` component: the file title must not hand it every item.
+    from apex.intent.english import spec_items
+
+    text = "# Contracts: English spec\n\nintro\n\n## round2\n- a\n\n## Contracts\n- c\n"
+    assert [i.text for i in spec_items(text, "Contracts")] == ["c"]
+    assert [i.text for i in spec_items(text, "round2")] == ["a"]
+    assert spec_items("# Contracts: English spec\n\n## round2\n- a\n", "Contracts") == []
+    assert [i.text for i in spec_items("# clamp\n- x\n", "clamp")] == ["x"]  # a lone heading
+
+
+def test_a_spec_hint_that_does_not_parse_says_why(tmp_path) -> None:
+    from apex.intent.english import mine_english
+
+    spec = tmp_path / "m.spec.md"
+    spec.write_text("# m\n## f\n- Positive. `r > 0 and y`\n- Plain. `emphasis`\n")
+    mined, _ = mine_english(spec, "f", ["x"], set())
+    positive, plain = mined.candidates
+    assert positive.hint is None and "hint `r > 0 and y` not used: unknown name `y`" in (
+        positive.text
+    )
+    assert plain.hint is None and plain.text == "Plain."

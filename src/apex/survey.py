@@ -253,7 +253,7 @@ def _stack(root: Path) -> list[str]:
 
 
 def _classify(target: str, ws) -> FunctionSurvey:
-    from apex.pipeline import _analyze
+    from apex.pipeline import _analyze, _runs_privately
 
     a = _analyze(target, None)
     info = a.info
@@ -289,7 +289,7 @@ def _classify(target: str, ws) -> FunctionSurvey:
         )
         status: Status = "needs_signature"
         reason = "no types for its parameters or result"
-    elif info.language == "js" and not info.exported:
+    elif info.language == "js" and not info.exported and not _runs_privately(info):
         status, reason = "not_exported", "not exported, so Apex cannot run it"
         asks.append("Export it (or check the exported function that calls it).")
     elif gap is not None and gap.reason_code is ReasonCode.FLOAT_SEMANTICS:

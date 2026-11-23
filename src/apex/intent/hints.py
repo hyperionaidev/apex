@@ -80,7 +80,19 @@ def _is_integer(x: Any) -> bool:
     )
 
 
+def _dec(x: Any) -> Any:
+    """The exact decimal a float input stands for: its shortest repr, as a fraction (0.1 is
+    1/10, not 0.1000000000000000055...). Arithmetic on the results is exact, so a hint can say
+    what amounts with cents should give without binary-float error of its own."""
+    if isinstance(x, bool) or not isinstance(x, int | float | Fraction):
+        return x
+    if isinstance(x, float):
+        return Fraction(repr(x)) if math.isfinite(x) else x
+    return Fraction(x)
+
+
 VALUE_OPS = {
+    "apex_dec": _dec,
     "apex_round": _js_round,
     "apex_floor": math.floor,
     "apex_ceil": math.ceil,
@@ -89,7 +101,8 @@ VALUE_OPS = {
     "apex_close": _close,
 }
 """Helpers for hints on runnable values: JS `Math.round`, `Math.floor`, `Math.ceil`,
-`Math.trunc` and `Number.isInteger` as JavaScript means them, and `apex_close(a, b, tol)`."""
+`Math.trunc` and `Number.isInteger` as JavaScript means them, `apex_close(a, b, tol)`, and
+`apex_dec(x)`, the exact decimal a float stands for."""
 
 REFERENCE_OPS = frozenset({"apex_reference", "apex_exact"})
 """Bound per target when it has a reference (see apex.intent.references): `apex_reference(...)`

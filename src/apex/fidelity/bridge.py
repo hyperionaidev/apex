@@ -141,12 +141,20 @@ def strategy_for(
     domain: "Domain | None" = None,
     module: Any = None,
     js: bool = False,
+    fields: "dict[str, Domain] | None" = None,
+    path: str = "",
 ) -> st.SearchStrategy[Any]:
     from apex.fidelity.values import strategy_for as value_strategy
 
     try:
         return value_strategy(
-            ty, ints if ints is not None else MIXED_INTS, domain=domain, module=module, js=js
+            ty,
+            ints if ints is not None else MIXED_INTS,
+            domain=domain,
+            module=module,
+            js=js,
+            fields=fields,
+            path=path,
         )
     except ValueError as e:
         raise FidelityError(str(e)) from e
@@ -161,9 +169,12 @@ def params_strategy(
     `apex.profile.toml`."""
     js = info.language == "js"
     ints = ints_for(info)
+    fields = {k: d for k, d in info.domains.items() if "." in k}
     return st.tuples(
         *(
-            strategy_for(t, ints, domain=info.domains.get(n), module=module, js=js)
+            strategy_for(
+                t, ints, domain=info.domains.get(n), module=module, js=js, fields=fields, path=n
+            )
             for n, t in params
         )
     )

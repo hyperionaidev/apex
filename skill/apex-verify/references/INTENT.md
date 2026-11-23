@@ -38,6 +38,12 @@ conditional expressions; comprehensions and generators; `all`, `any`, `len`, `ab
 | `apex_round(x)`, `apex_floor(x)`, `apex_ceil(x)`, `apex_trunc(x)` | JavaScript's `Math.round` (halves up), `Math.floor`, `Math.ceil`, `Math.trunc` (in JS hints, write `Math.round(x)` and so on) |
 | `apex_is_integer(x)` | `Number.isInteger(x)` |
 | `apex_close(a, b, tol)` | equal values, numbers within `tol` (element-wise in lists and records) |
+| `apex_dec(x)` | the exact decimal a float input stands for (`apex_dec(0.1)` is exactly 1/10); arithmetic on it is exact |
+
+Money in floats: say "to the cent" by comparing cents, `apex_round(a * 100) == apex_round(b * 100)`,
+never `a == b`. To state what an amount should be, compute it from `apex_dec` of every float input,
+or the hint has float error of its own: `apex_round(8.2 * 0.125 * 100)` is 102 (the float product
+is 102.4999...), `apex_round(apex_dec(8.2) * apex_dec(0.125) * 100)` is 103.
 
 Nothing else: no method calls (put the logic in a same-module helper and call that). Only hints
 on int, bool, list, tuple and optional values become Lean theorems; hints on strings, floats,

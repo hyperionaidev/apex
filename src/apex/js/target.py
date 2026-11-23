@@ -19,19 +19,25 @@ def apply_signature(fn: JsFunction, sig: str, where: str) -> None:
     if root.has_error or decl is None or decl.type != "function_declaration":
         raise TargetError(f"apex.profile.toml: cannot read the signature of {where}: `{sig}`")
     plist = decl.child_by_field_name("parameters")
-    types = []
+    types, names = [], []
     for p in plist.named_children if plist is not None else []:
         ann = p.child_by_field_name("type")
         if ann is None or not ann.named_children:
             raise TargetError(f"apex.profile.toml: {where}: every parameter needs a type")
         types.append(ann.named_children[0])
+        pattern = p.child_by_field_name("pattern")
+        names.append(text(pattern) if pattern is not None else "")
     if len(types) != len(fn.params):
         raise TargetError(
             f"apex.profile.toml: the signature of {where} has {len(types)} parameters; the "
             f"function has {len(fn.params)}"
         )
-    for p, t in zip(fn.params, types, strict=True):
+    for p, t, n in zip(fn.params, types, names, strict=True):
         p.type = t
+        if not p.name.isidentifier() and n.isidentifier():
+            # A destructured parameter (`({ a, b }) =>`) has no name of its own; hints and
+            # domains call it by the profile's name (`args.a`).
+            p.name = n
     rt = decl.child_by_field_name("return_type")
     fn.returns = rt.named_children[0] if rt is not None and rt.named_children else None
 

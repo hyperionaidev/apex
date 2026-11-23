@@ -21,7 +21,7 @@ import math
 import os
 import re
 import time
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from fractions import Fraction
 from typing import Any
 
@@ -280,12 +280,16 @@ def strategy_for(
     domain: Domain | None = None,
     module: Any = None,
     js: bool = False,
+    fields: Mapping[str, Domain] | None = None,
+    path: str = "",
 ) -> st.SearchStrategy[Any]:
     """Inputs of type `ty`. `domain`: the profile's domain for this parameter. `module`: the
-    loaded Python module (for dataclasses and Enum classes). `js`: values for JavaScript."""
+    loaded Python module (for dataclasses and Enum classes). `js`: values for JavaScript.
+    `fields`: domains of record fields, keyed by their path from the parameter (`args.amount`;
+    list elements and optional values keep their container's path), `path` being this value's."""
 
-    def sub(t: PyType) -> st.SearchStrategy[Any]:
-        return strategy_for(t, ints, module=module, js=js)
+    def sub(t: PyType, p: str = path, d: Domain | None = None) -> st.SearchStrategy[Any]:
+        return strategy_for(t, ints, domain=d, module=module, js=js, fields=fields, path=p)
 
     match ty.kind:
         case "int":
@@ -312,7 +316,7 @@ def strategy_for(
         case "tuple":
             return st.tuples(*(sub(a) for a in ty.args))
         case "option":
-            return st.none() | strategy_for(ty.args[0], ints, domain=domain, module=module, js=js)
+            return st.none() | sub(ty.args[0], d=domain)
         case "dict":
             keys = (
                 st.one_of(st.sampled_from(["a", "b", "id1", "", "x y"]), st.text(max_size=6))
@@ -322,9 +326,14 @@ def strategy_for(
             strat = st.dictionaries(keys, sub(ty.args[1]), max_size=4)
             return strat.map(JsRecord) if js else strat
         case "record":
-            fields = dict(zip(ty.names, ty.args, strict=True))
-            required = {n: sub(t) for n, t in fields.items() if n not in ty.optional}
-            optional = {n: sub(t) for n, t in fields.items() if n in ty.optional}
+            members = dict(zip(ty.names, ty.args, strict=True))
+
+            def field(n: str, t: PyType) -> st.SearchStrategy[Any]:
+                p = f"{path}.{n}"
+                return sub(t, p, (fields or {}).get(p))
+
+            required = {n: field(n, t) for n, t in members.items() if n not in ty.optional}
+            optional = {n: field(n, t) for n, t in members.items() if n in ty.optional}
             strat = st.fixed_dictionaries(required, optional=optional)
             if ty.ref is not None and module is not None and hasattr(module, ty.ref):
                 cls = getattr(module, ty.ref)

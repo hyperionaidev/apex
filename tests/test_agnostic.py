@@ -214,6 +214,11 @@ def test_js_math_helpers_mean_what_javascript_means() -> None:
     assert _to_fixed(1.005, 2) == "1.00"  # 1.005 is 1.00499999... as a float
     assert _to_fixed(Fraction("1.005"), 2) == "1.01"
     assert _to_fixed(-0.255, 2) == "-0.26" and _to_fixed(-0.001, 2) == "-0.00"
+    # apex_dec: what a hint about cents needs to have no float error of its own.
+    dec = VALUE_OPS["apex_dec"]
+    assert dec(0.1) == Fraction(1, 10) and dec(3) == 3 and dec(True) is True and dec("x") == "x"
+    assert js_round(8.2 * 0.125 * 100) == 102  # the float product is 102.4999...
+    assert js_round(dec(8.2) * dec(0.125) * 100) == 103
 
 
 # ---- refutation on runnable types --------------------------------------------------------------
@@ -364,6 +369,110 @@ def test_domain_patterns() -> None:
     assert prof.domain_for(Path("/proj/m.py"), "g", "y").kind == "decimal"
     assert prof.domain_for(Path("/proj/n.py"), "h", "totalCents").kind == "int"
     assert prof.domain_for(Path("/proj/n.py"), "h", "other") is None
+
+
+@needs_node
+def test_profile_domains_reach_record_fields_and_name_destructured_params(tmp_path: Path) -> None:
+    # App code takes options objects (`({ amount, pct }) =>`): the profile names the parameter
+    # and its field domains decide what is drawn, so money fields are drawn with cents.
+    (tmp_path / "apex.profile.toml").write_text(
+        textwrap.dedent(
+            """
+            [types]
+            Line = "{ amount: number; pct: number }"
+
+            [signatures]
+            "m.js::partnerCents" = "(line: Line) => number"
+
+            [[domains]]
+            params = ["*.amount"]
+            kind = "decimal"
+            places = 2
+            min = 0
+            max = 1000
+            """
+        )
+    )
+    _write(
+        tmp_path,
+        "m.spec.md",
+        """
+        # m
+        ## partnerCents
+        - The whole line, in cents. `result === Math.round(line.amount * 100)`
+        """,
+    )
+    p = _write(
+        tmp_path,
+        "m.js",
+        """
+        export const partnerCents = ({ amount, pct }) => Math.floor(amount * 100);
+        const helper = (x) => x + 1;
+        """,
+    )
+    ws = _ws(tmp_path)
+    a = _analyze(f"{p}::partnerCents", ws)
+    assert a.sig is not None
+    ((name, line_t),) = a.sig.params
+    assert name == "line"
+    assert dict(zip(line_t.names, line_t.args, strict=True))["amount"] == FLOAT
+    assert "line.amount" in a.info.domains
+    prop = next(p for p in a.intent.properties if p.formal_hint)
+    assert "line.amount" in prop.formal_hint
+    cx = _refuted(f"{p}::partnerCents", ws)[prop.id]
+    assert cx is not None  # e.g. amount 0.29: Math.floor(28.999999999999996) is 28
+
+
+def test_the_model_formalizing_intent_sees_runtime_types_and_domains(tmp_path: Path) -> None:
+    # Told `int`, a model writes `a + b == total` for money; told `number` with a cents domain,
+    # it can say "to the cent".
+    from apex.intent.propose import SYSTEM, build_prompt
+
+    (tmp_path / "apex.profile.toml").write_text(
+        textwrap.dedent(
+            """
+            [types]
+            Line = "{ amount: number; pct: number }"
+
+            [signatures]
+            "m.js::split" = "(line: Line) => { partner: number; company: number }"
+
+            [[domains]]
+            params = ["amount"]
+            kind = "decimal"
+            places = 2
+            note = "invoice amounts"
+            """
+        )
+    )
+    _write(tmp_path, "m.spec.md", "# m\n## split\n- The parts add up to the amount, to the cent.\n")
+    p = _write(
+        tmp_path,
+        "m.js",
+        """
+        export const split = ({ amount, pct }) => ({ partner: amount * pct, company: 0 });
+        export const other = ({ x }) => x;
+        """,
+    )
+    a = _analyze(f"{p}::split", _ws(tmp_path))
+    prompt = build_prompt(a.info, a.intent, a.spec_items, from_source=False, sig=a.sig)
+    assert (
+        "def split(line: {amount: number, pct: number}) -> {partner: number, company: number}"
+        in (prompt)
+    )
+    assert "line.amount: decimal places=2  (invoice amounts)" in prompt
+    assert "__apex_record__" not in prompt and "def other(_)" in prompt
+    assert "apex_round" in SYSTEM and "never compare computed floats" in SYSTEM
+
+
+def test_bare_domain_patterns_name_record_fields() -> None:
+    prof = Profile(
+        domains=[Domain(params=["amount"], kind="decimal"), Domain(params=["f.x.*"], kind="int")],
+        root=Path("/proj"),
+    )
+    assert prof.domain_for(Path("/proj/m.js"), "g", "args.amount").kind == "decimal"
+    assert prof.domain_for(Path("/proj/m.js"), "f", "x.count").kind == "int"
+    assert prof.domain_for(Path("/proj/m.js"), "g", "args.other") is None
 
 
 # ---- exact arithmetic and reference implementations -------------------------------------------
@@ -574,12 +683,21 @@ def test_survey_reports_clues_and_drafts_a_profile(tmp_path: Path, monkeypatch) 
         export function toCents(amount) {
           return Math.round(amount * 100);
         }
+        /** @param {number} n @returns {number} */
+        const twice = (n) => n * 2;
+        /** @param {number} n @returns {number} */
+        const viaImport = (n) => imported(n);
+        import { imported } from './elsewhere';
         """,
     )
     s = survey(["inv.js"], _ws(tmp_path))
     assert {"react", "firebase"} <= set(s.stack)
     by = {f.target.rsplit("::", 1)[1]: f for f in s.functions}
     assert by["isOpen"].status == "needs_signature"
+    # A private helper still runs from the module's import-free slice; one that needs an
+    # import does not.
+    assert by["twice"].status != "not_exported"
+    assert by["viaImport"].status in ("not_exported", "impure")
     (inv,) = by["isOpen"].params
     assert {"status", "paid", "amount"} <= set(inv.fields)
     assert inv.compared_to == {"inv.status": ["active"]}
