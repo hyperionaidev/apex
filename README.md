@@ -4,864 +4,197 @@
   <img src="docs/assets/apex-header.png" alt="Apex. Democratizing Formal Verification for the Agentic Era." width="100%">
 </p>
 
-Apex verifies Python, JavaScript and TypeScript functions against a statement of their intended
-behavior. It uses three verification engines and gives one report.
+Apex checks Python, JavaScript and TypeScript functions against what they are supposed to do.
+It uses three verification engines and gives one report:
 
-| Engine | Function | Question that it answers |
-|---|---|---|
-| Lean 4 theorem prover | Proves a property for all inputs. | Is the property true for every input? |
-| TLA+ model checker (TLC) | Examines all thread interleavings of a concurrent function, within set bounds. | Can a thread schedule break the property? |
-| Fuzzing and refutation | Runs the real code with generated, coverage-guided and symbolic inputs. | Is there an input that breaks the property? |
+| Engine | Question that it answers |
+|---|---|
+| **Lean 4** theorem prover | Is the property true for every input? |
+| **TLA+** model checker (TLC) | Can a thread schedule break the property? |
+| **Fuzzing and refutation** on the real code | Is there an input that breaks the property? |
 
-**Apex uses the intent that your project already has.** You do not write a formal
-specification. Apex reads the intent from these sources and combines it into one set of
-properties:
+You do not write a formal specification, and you do not need to know Lean, TLA+ or fuzzing.
+Apex reads the intent that your project already has (English specs, docstrings and JSDoc,
+tests, guards in the code), writes the theorems, and runs the engines. Your coding agent does
+the model work: it formalizes English requirements and writes the proofs that Apex's tactics do
+not find. A person approves what each statement means.
 
-- **Specifications in English.** A Markdown file next to the module (`<module>.spec.md`) with
-  one requirement for each list item.
-- **Documentation in the code.** Docstrings and JSDoc: examples, doctests, `@example` tags, and
-  `pre:` and `post:` lines.
-- **Tests.** pytest, Hypothesis, Jest, Vitest, node:assert and fast-check.
-- **The code.** Assertions and guards at the start of a function (preconditions).
-
-When two sources disagree, Apex reports the conflict. It does not select one source.
-
-**Apex operates in your coding agent.** One command (`apex skill install --with-mcp`) installs
-the `apex-verify` Agent Skill and the `apex` MCP server for Claude Code, Codex, Gemini CLI,
-Cursor and VS Code (Copilot). The agent writes the code, Apex verifies it, and the agent uses
-the counterexample to correct the code. This cycle is tested end to end in Claude Code and
-Codex. Apex also operates from the command line and in CI (exit codes and SARIF).
-
-Apex sends each function to the applicable engines:
-
-- A pure function in the supported subset goes to Lean 4.
-- A pure function outside the subset goes to fuzzing and refutation.
-- A concurrent function goes to TLA+.
-
-Each property gets one of these results:
-
-- **Proven.** Lean 4 checked a proof that the code satisfies the statement for all inputs.
-- **Refuted.** Apex found an input, or a recorded thread schedule, that makes the real code fail.
-  The report includes the data to replay the failure.
-- **Evidence.** `model_checked` (TLA+) or `fuzzed` (fuzzing). The report gives the bounds or the
-  number of executions. Evidence is not a proof.
-- **Gap.** Apex cannot give a result. The report gives the reason and the change that is
-  necessary.
-
-You do not need to know Lean, TLA+ or fuzzing. Apex writes the theorems and specifications and
-runs the engines. An AI model can do the repetitive parts, if you configure one. A person must
-confirm that each statement agrees with the intended behavior of the code.
-
-> **Status:** Research prototype. Supported languages: Python, JavaScript and TypeScript.
-> License: MIT. The package is not on PyPI. Read the [quickstart](docs/QUICKSTART.md) first.
-> Read [what Apex cannot prove](docs/LIMITS.md) before you use a verdict.
-
----
+> **Status:** Research prototype. Python, JavaScript and TypeScript. MIT license. Not on PyPI.
+> Start with the [quickstart](docs/QUICKSTART.md), and read [what Apex cannot prove](docs/LIMITS.md)
+> before you rely on a verdict.
 
 ## Contents
 
-- [The problem](#the-problem)
-- [How Apex solves the problem](#how-apex-solves-the-problem)
-- [Verdicts](#verdicts)
+- [Why Apex](#why-apex)
+- [Verdicts and exit codes](#verdicts-and-exit-codes)
 - [Installation](#installation)
 - [Quick start](#quick-start)
-- [How to state the intent](#how-to-state-the-intent)
-- [Usage](#usage)
-  - [Command line](#command-line)
-  - [Model-assisted steps](#model-assisted-steps)
-  - [Coding agents: skill and MCP](#coding-agents-skill-and-mcp)
-  - [Existing projects: survey, profile, references, decisions](#existing-projects-survey-profile-references-decisions)
-  - [Fuzzing and refutation](#fuzzing-and-refutation)
-  - [TLA+ for concurrent code](#tla-for-concurrent-code)
-  - [JavaScript and TypeScript](#javascript-and-typescript)
-  - [Continuous integration](#continuous-integration)
-  - [Configuration](#configuration)
-- [Architecture](#architecture)
-- [Design principles](#design-principles)
-- [Trust base](#trust-base)
-- [Limits](#limits)
-- [Evaluation](#evaluation)
+- [Stating the intent](#stating-the-intent)
+- [Using Apex from a coding agent](#using-apex-from-a-coding-agent)
+- [Documentation](#documentation)
 - [Development](#development)
-- [Project history](#project-history)
 - [License](#license)
 
----
+## Why Apex
 
-## The problem
+Coding agents write code faster than people can review it. Tests cover only the inputs their
+author chose, and when the same model writes the code and its tests, both can share one mistake.
+An agent saying the code "works" is not evidence.
 
-Coding agents now write a large part of new code. An agent can write a function in seconds and
-hundreds of functions in a day. Thus, the difficult task is no longer to write code. The
-difficult task is to know that the code is correct.
-
-The usual controls do not scale to this volume:
-
-- **Review.** People cannot read code as fast as agents write it. Generated code usually looks
-  correct, so a reviewer can easily miss an off-by-one error.
-- **Tests.** A test suite examines only the inputs that its author selected. Many errors occur
-  at other inputs, for example an empty list, a negative number or a boundary value.
-- **Self-verification.** Frequently the same model writes the code and its tests. Then the tests
-  and the code can have the same errors.
-- **Agent statements.** A statement from an agent that the code "works" is not evidence. It is
-  more generated text.
-
-Formal methods give stronger results:
-
-- **Theorem proving** shows that code satisfies its specification for all inputs.
-- **Model checking** examines all interleavings of concurrent code.
-- **Systematic fuzzing** runs very large numbers of inputs to find a failure.
-
-These methods protect operating-system kernels, compilers, cryptographic libraries and
-distributed systems. But they are not frequently used on ordinary code. Each method needs
-specialists, special tools and much time for each component.
-
-AI coding makes formal methods more necessary, because there is more code than people can
-review. AI models also make formal methods easier, because models can do the repetitive work.
-A model must not decide if its own work is correct. Apex makes this separation.
-
-## How Apex solves the problem
-
-Apex divides the work into three roles. No single role controls the result.
+Formal methods give stronger answers, but they usually need specialists. Apex lets models do
+the repetitive work without letting them decide whether that work is correct:
 
 | Role | Done by | Tasks |
 |---|---|---|
-| Propose | An AI model, a coding agent, or Apex heuristics | Write formal statements from English text. Write proofs. Write TLA+ specifications. |
-| Decide | Lean 4, TLC, and the real code under test | Compile each proof and audit its axioms. Model-check each specification. Run the real code to confirm or refute. |
-| Approve | A person | Confirm that each statement agrees with the intended behavior of the code. |
+| Propose | A coding agent, an AI model, or Apex heuristics | Formal statements from English, proofs, TLA+ specifications |
+| Decide | Lean 4, TLC, and the real code | Check each proof and audit its axioms, model-check each spec, run the real code |
+| Approve | A person | Confirm that each statement says what the code is meant to do |
 
-Each verdict tells the strength of its result:
+A model can make Apex faster. It cannot produce a `proven` verdict: only a Lean proof of a
+statement that a person approved can.
 
-| Strength | Verdict | Source |
+## Verdicts and exit codes
+
+Each property gets one verdict, and each verdict states how strong it is:
+
+| Verdict | Meaning | Exit |
 |---|---|---|
-| True for all inputs | `proven` | Lean 4, for a statement that a person approved |
-| True for all interleavings within the bounds | `model_checked` | TLC, and the recorded runs agree with the specification |
-| No counterexample in N executions | `fuzzed` | A fuzzing campaign on the real code |
-| Failure observed | `refuted` | Any engine, after Apex ran the real code and saw the failure |
+| `proven` | Lean proved an approved statement for every input. | 0 |
+| `refuted` | Apex ran the real code and saw it break the property. The report has the input. | 1 |
+| `contradiction` | Two intent sources disagree (a docstring and a test, for example). | 1 |
+| `fidelity_failed` | The model Apex checked (Lean or TLA+) does not match the real code. | 1 |
+| `proven_unreviewed` | Proven, but no person approved the statement yet. | 2 |
+| `proven_conditional` | Proven under an assumption the code does not state (JS `number` stays a safe integer). | 2 |
+| `model_checked` | TLC found no violation within the bounds, and real runs match the spec. Evidence, not proof. | 2 |
+| `fuzzed` | A recorded fuzzing campaign found no counterexample. Evidence, not proof. | 2 |
+| `unproven` | No proof and no counterexample within the budget. The report says why. | 2 |
+| `out_of_scope` | Apex cannot model this code (I/O, unsupported constructs). The report says why. | 2 |
 
-An AI model can make Apex faster. A model cannot cause a `proven` verdict. Only a Lean 4 proof
-of an approved statement can cause it.
-
-Apex is for these users:
-
-- Developers who need more than tests for important functions, for example arithmetic, bounds
-  checks, sorting, encoders and small algorithms.
-- Teams that use coding agents. The agent writes the code, Apex verifies it, and the agent uses
-  the counterexample to correct the code.
-- CI pipelines that need a machine-readable result: exit codes and SARIF.
-
-## Verdicts
-
-Each property gets exactly one verdict. The verdict names are part of the interface. All output
-formats show the names without change.
-
-| Verdict | Meaning | Exit code |
-|---|---|---|
-| `proven` | Lean proved a statement that a person approved. The proof uses only the standard axioms. The Lean model agreed with the real code on generated inputs. | 0 |
-| `refuted` | An input, or a recorded run of concurrent code, makes the real code break the property. Apex observed the failure. | 1 |
-| `contradiction` | Two intent sources disagree. Example: the docstring gives `f(2) == 6` and a test gives `f(2) == 5`. | 1 |
-| `fidelity_failed` | The model that Apex examined (Lean model or TLA+ specification) does not agree with the real code. Apex discards all results about that model. | 1 |
-| `proven_unreviewed` | Lean proved the statement, but no person approved the statement. | 2 |
-| `proven_conditional` | Lean proved the statement under an assumption that the code does not state. | 2 |
-| `unproven` | Apex found no proof and no counterexample within the budget. The report gives a reason code. | 2 |
-| `out_of_scope` | Apex cannot model the code exactly (I/O, floats, unsupported constructs). The report gives a reason code. | 2 |
-| `fuzzed` | Lean did not decide the property. A recorded fuzzing campaign found no counterexample. This is evidence, not proof. | 2 |
-| `model_checked` | TLC found no violation of the TLA+ specification within the bounds, and the real runs agree with the specification. This is evidence, not proof. | 2 |
-
-The exit code of a run is:
-
-- **0:** All approved properties are proven.
-- **1:** At least one failure.
-- **2:** Gaps only.
-- **3:** Tool error (Lean is missing, the configuration is incorrect, a crash, or a timeout).
-
-These rules apply:
-
-- A failure has priority over a gap.
-- A function with no intent counts as a gap. Thus, a run cannot pass when it examines nothing.
-- The `fail_on` setting can change selected gaps into failures.
+A run exits with **0** when all approved properties are proven, **1** on any failure, **2** for
+gaps only, and **3** on a tool error. A function with no intent counts as a gap, so a run that
+checks nothing cannot pass. The `fail_on` setting can turn chosen gaps into failures.
 
 ## Installation
 
-Requirements for each engine:
-
-| For | Requirement |
-|---|---|
-| Apex, refutation and Hypothesis fuzzing | Python 3.12 or later, and [uv](https://docs.astral.sh/uv/) |
-| Lean 4 proofs | [elan](https://github.com/leanprover/elan). Approximately 5 GB of disk space for the pinned toolchain and the Mathlib cache. All projects share this installation. |
-| TLA+ model checking | Java 11 or later. `apex init --tla` installs the pinned TLC. |
-| Coverage-guided Python fuzzing (optional) | The `fuzz` extra (Atheris). It needs a clang compiler that includes libFuzzer (on macOS, Homebrew LLVM). |
-| JavaScript and TypeScript | Node.js 22.6 or later. No npm packages are necessary. |
-| Coverage-guided JavaScript fuzzing (optional) | npm. `apex init --js` installs the pinned Jazzer.js. |
-| Model-assisted steps (optional) | Claude Code or Codex with a login, or an API key |
-
-Apex is not on PyPI. Install it from the repository:
+You need Python 3.12+, [uv](https://docs.astral.sh/uv/) and, for proofs,
+[elan](https://github.com/leanprover/elan) (about 5 GB for the pinned Lean toolchain and
+Mathlib, shared by all projects).
 
 ```sh
 git clone https://github.com/hyperionaidev/apex && cd apex
 uv build && uv tool install dist/apex_verify-*.whl
 apex init            # writes apex.toml, installs the pinned Lean toolchain and Mathlib cache
-apex doctor          # all required items show "ok"; optional items can show "warn"
+apex doctor          # required items show "ok"; optional ones may show "warn"
 ```
 
-Optional components:
+Optional engines:
 
-```sh
-apex init --tla                                    # pinned TLA+ tools (TLC 1.7.4, checksum verified)
-apex init --js                                     # pinned Jazzer.js (JavaScript fuzzing)
-uv tool install 'dist/apex_verify-*.whl[fuzz]'     # Atheris; on macOS, first set:
-                                                   #   export CLANG_BIN=$(brew --prefix llvm)/bin/clang
-```
+| For | Requirement |
+|---|---|
+| JavaScript and TypeScript | Node.js 22.6 or later (no npm packages) |
+| TLA+ model checking | Java 11+, then `apex init --tla` |
+| Coverage-guided JavaScript fuzzing | npm, then `apex init --js` (Jazzer.js) |
+| Coverage-guided Python fuzzing | the `fuzz` extra (Atheris) and a clang with libFuzzer |
+| Model-assisted steps | Claude Code or Codex with a login, or an API key |
 
-`apex init` installs into `~/.apex`. The `APEX_HOME` variable changes this location. The
-installation is outside the package, thus an upgrade of Apex keeps the cache. Before
-`apex init` runs, the Lean commands stop with exit code 3. Refutation and fuzzing operate
-without Lean. On Windows, use WSL.
-
-To work on Apex itself, run `uv sync --all-extras && uv run apex init`.
+Refutation and fuzzing work without Lean. On Windows, use WSL. The
+[usage guide](docs/USAGE.md#installation-details) has the details and the
+[configuration](docs/USAGE.md#configuration) keys.
 
 ## Quick start
 
-1. Write a function and its intent. In this example, the docstring gives the intent:
+```python
+# shapes.py
+def clamp(x: int, lo: int, hi: int) -> int:
+    """Limit x to the range [lo, hi].
 
-   ```python
-   # shapes.py
-   def clamp(x: int, lo: int, hi: int) -> int:
-       """Limit x to the range [lo, hi].
+    pre: lo <= hi
+    post: lo <= __return__ <= hi
+    post: lo <= x <= hi -> __return__ == x
 
-       pre: lo <= hi
-       post: lo <= __return__ <= hi
-       post: lo <= x <= hi -> __return__ == x
-
-       >>> clamp(5, 0, 3)
-       3
-       """
-       return max(lo, min(x, hi))
-   ```
-
-2. Check the function:
-
-   ```sh
-   apex check shapes.py          # P1, P2 (post: lines) and E1 (doctest): proven_unreviewed, exit 2
-   ```
-
-3. Read the statements, in English and in Lean:
-
-   ```sh
-   apex review shapes.py::clamp
-   ```
-
-4. Approve the statements in your own terminal:
-
-   ```sh
-   apex review shapes.py::clamp --approve P1,P2,E1
-   ```
-
-5. Check the function again. The result is `proven` and the exit code is 0.
-
-To see a failure, change `min(x, hi)` to `min(x, hi - 1)` and check again. P2 and E1 become
-`refuted`, each with an input. P1 stays true, because the result stays in the range. Then use
-these commands:
-
-```sh
-apex explain                  # gives the meaning of each verdict in plain English
-apex suggest                  # gives the necessary changes and a pytest regression test for each counterexample
+    >>> clamp(5, 0, 3)
+    3
+    """
+    return max(lo, min(x, hi))
 ```
 
-The [quickstart](docs/QUICKSTART.md) shows these steps with real output.
+```sh
+apex check shapes.py                              # P1, P2 and E1: proven_unreviewed, exit 2
+apex review shapes.py::clamp                      # read the statements, in English and in Lean
+apex review shapes.py::clamp --approve P1,P2,E1   # in your own terminal
+apex check shapes.py                              # proven, exit 0
+```
 
-## How to state the intent
+Change `min(x, hi)` to `min(x, hi - 1)` and check again: P2 and E1 become `refuted`, each with
+an input. `apex explain` says what each verdict means, and `apex suggest` gives the fix and a
+regression test. The [quickstart](docs/QUICKSTART.md) walks through this with real output.
 
-Apex does not get the intent from the code. A proof of the code against itself shows nothing.
-Apex reads the intent from four sources and combines them into one Intent Model:
+## Stating the intent
 
-| Source | Python | JavaScript and TypeScript |
-|---|---|---|
-| Documentation comment | Docstring: doctests (examples), `pre:` and `post:` lines (formal properties) | JSDoc: `@example`, `@pre` and `@post` |
-| Tests | `test_<module>.py`: `assert f(...) == v`, `parametrize` rows, Hypothesis `@given` | `<module>.test.ts` or `.spec.ts` (also in `__tests__/`): Jest or Vitest `expect(f(...)).toBe(v)`, node:assert, fast-check properties |
-| English specification | `<module>.spec.md`: one requirement for each list item. A formal hint in backticks makes a requirement checkable. | The same |
-| Source code | Leading `assert` statements (preconditions) | Leading `if (...) throw` guards and `assert(...)` calls (preconditions) |
+Apex never takes the intent from the code itself: proving code against itself shows nothing.
+It reads and combines these sources:
 
-A formal hint is a Boolean expression of the parameters and the result:
-
-- In Python, write a Python expression. Use `r` or `__return__` for the result and `->` for
-  "implies".
-- In JavaScript, write a JavaScript expression. Use `result` for the result and `==>` for
-  "implies". Example: `lo <= result && result <= hi`.
-
-Example of an English specification for a Python module:
+- **English specs:** a `<module>.spec.md` next to the module, one requirement per list item.
+  A formal hint in backticks makes a requirement checkable; without one, the agent can
+  formalize it, and a person approves the result.
+- **Docstrings and JSDoc:** doctests, `@example`, `pre:`/`post:` and `@pre`/`@post`.
+- **Tests:** pytest, Hypothesis, Jest, Vitest, node:assert and fast-check.
+- **Guards:** leading `assert`s and `if (...) throw` become preconditions.
 
 ```markdown
 ## clamp
 - Requires: the range is not empty. `lo <= hi`
 - The result lies in [lo, hi]. `lo <= r <= hi`
 - Values in the range are not changed. `lo <= x <= hi -> r == x`
-- It is fast.            <- no hint: the requirement stays as text (SPEC_AMBIGUOUS)
 ```
 
-These rules apply to the intent:
+When two sources disagree, Apex reports a `contradiction` and does not pick one. See
+[stating the intent](docs/USAGE.md#how-to-state-the-intent) for the hint language.
 
-- When two sources give the same claim, Apex makes one property that refers to both sources.
-- When two sources disagree, both properties get the verdict `contradiction`. Apex does not
-  examine them against the code until a person decides which source is correct.
-- An AI model can write a formal hint for an English requirement (`apex intent propose`). The
-  hint is only a draft. A person must approve the resulting statement.
+## Using Apex from a coding agent
 
-## Usage
-
-### Command line
-
-`apex check` runs all stages. Each stage is also a separate command.
+Apex assumes a coding agent is available. One command installs the `apex-verify`
+[Agent Skill](skill/apex-verify/SKILL.md) and the `apex` MCP server for Claude Code, Codex,
+Gemini CLI, Cursor and VS Code (Copilot):
 
 ```sh
-apex check src/                       # runs all stages on files or a package
-apex check src/ --sarif apex.sarif    # also writes SARIF for code-scanning tools
-apex report                           # shows the last report
-apex explain                          # explains each verdict in plain English
-apex suggest                          # gives the next steps for each verdict
+apex skill install --with-mcp
 ```
 
-```sh
-apex analyze  mathx.py::clamp         # purity, Lean model, Intent Model
-apex scaffold mathx.py::clamp         # writes .apex/lean/mathx/clamp/{Model,Spec}.lean
-apex review   mathx.py::clamp         # shows the statements and their review status
-apex prove    mathx.py::clamp --tactics-only   # tries the tactic tiers, then verifies
-apex verify   mathx.py::clamp         # cold Lean compile, axiom audit, fidelity check, refutation
-apex refute   mathx.py::clamp         # searches the real code for counterexamples
-apex survey   src/                    # what a project must tell Apex (see Existing projects)
-apex reference add mathx.py::clamp --snapshot  # the current version, as a reference
-apex decide   mathx.py::clamp P1 --ask "..."   # a question for the owner
-```
+Then ask the agent to verify a function. The agent runs Apex, reads the counterexamples, fixes
+the code, and writes the proofs that Apex's tactics leave open, using the proof tasks and Lean
+tools Apex gives it. It shows you the result table and asks you to approve the statements; no
+tool can approve on your behalf.
 
-A target has the form `path::function`. All commands accept `--json`. The JSON schemas are in
-`schemas/`. The `report`, `check` and `verify` commands also accept `--markdown`.
-
-### Model-assisted steps
-
-Two steps can use an AI model:
-
-- Writing formal hints from English requirements.
-- Writing proofs that the tactic tiers do not find.
-
-Apex assumes a coding agent is available. By default (`auto`) it uses the first coding agent CLI
-that is installed and logged in (Claude Code, then Codex), then an API key. If it finds none, the
-model steps are skipped and the open proofs come back as proof tasks. Set the model access with
-`model_provider`, or with the environment variable `APEX_MODEL_PROVIDER` (for example `none` in
-CI):
-
-| `model_provider` | Access |
-|---|---|
-| `auto` (default) | The first of: `claude-code`, `codex`, `anthropic`, `openai` that is available on this machine. `apex doctor` shows the choice. |
-| `claude-code`, `codex` | The coding agent that is installed and logged in. Apex runs it without a user interface. |
-| `anthropic`, `openai` | An API key in `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` |
-| `host` | Only the agent that controls Apex writes the hints and proofs. |
-| `none` | No model. All deterministic steps run. |
-
-```sh
-apex check src/                         # auto: uses the installed agent CLI
-apex check src/ --provider codex        # or name one
-```
-
-A proof from a model must obey the same rules as a proof from a person:
-
-- Apex rejects the proof before Lean runs if the proof changes an approved statement or uses a
-  prohibited token (`sorry`, `native_decide`, `axiom` and others).
-- Apex sends the Lean errors and goal states back to the model for more attempts.
-- The same cold verdict path examines each proof that compiles.
-
-### Coding agents: skill and MCP
-
-```sh
-apex skill install --with-mcp     # installs the apex-verify skill and the `apex` MCP server
-```
-
-This command installs one [Agent Skill](skill/apex-verify/SKILL.md). Claude Code, Codex,
-Gemini CLI, Cursor and VS Code (Copilot) read this skill. The command also adds an `apex` entry
-to the MCP configuration of each tool. It does not overwrite existing entries.
-
-After the installation, ask the agent to verify a function. The skill does these steps:
-
-- It runs the Apex pipeline.
-- It shows the Apex result table without change.
-- It asks you to approve the statements. No tool can approve on your behalf, because approval
-  needs an interactive terminal.
-
-The MCP server (`apex mcp`) supplies the deterministic commands as typed tools, for example
-`apex_analyze`, `apex_verify`, `apex_refute`, `apex_fuzz` and `apex_tla_check`. For a rejected
-proof, the server returns the Lean errors, the line in the file that the agent edits, and the
-goal state. The smoke tests run Claude Code and Codex through a full cycle: write the code, fail
-verification, read the counterexample, correct the code, pass.
-
-#### The agent writes the proofs Apex's tactics do not find
-
-Apex's tactic tiers close the simple properties. For every theorem they leave open, Apex hands
-the work to the coding agent instead of stopping:
-
-- `apex prove` (MCP `apex_prove`) and `apex lean tasks <target>` (`apex_lean_tasks`) return a
-  proof task per open theorem: the statement, its line in the spec, the goal after `intros`, the
-  definitions to unfold, and a strategy read off the model (a fold needs a generalized
-  accumulator, a loop with early exits is a helper defined by recursion on the list, and so on).
-- `apex lean goals <target> P2 --tactics '...'` (`apex_lean_goals`) shows the goals left after a
-  tactic script, so the agent builds the proof step by step.
-- `apex lean run <target> --code '...'` (`apex_lean_run`) runs Lean commands against the model:
-  `#check`, `#print`, `exact?`, `simp?`, scratch lemmas.
-- `apex lean termination <target> f.loop1 --measure '...'` (`apex_lean_termination`) gives a
-  termination measure for a `while` loop or recursion that Apex's own candidates did not cover.
-
-None of these produce a verdict. The agent writes the proof into the spec file, and `apex verify`
-compiles it cold, audits its axioms and runs the fidelity check, exactly as for a proof from a
-person. Exploration may use `sorry`; the spec may not.
-
-```sh
-apex prove ai_claude.py::is_balanced --tactics-only   # P1 closes; P2 comes back as a proof task
-apex lean goals ai_claude.py::is_balanced P2 --tactics 'unfold is_balanced at h1
-simp only at h1'
-apex verify ai_claude.py::is_balanced                 # after the agent writes P2's proof
-```
-
-### Existing projects: survey, profile, references, decisions
-
-App code differs from a small algorithm. It is often untyped. Its bugs live in records,
-strings, dates and float money arithmetic. And some of what it should do is a product decision
-that the code does not record. Apex does not guess project facts. The coding agent finds them in
-the project, and Apex checks the code against them.
-
-```sh
-apex survey src/                     # what Apex cannot read from the code, with clues
-apex survey src/ --draft             # a drafted apex.profile.toml with TODOs
-```
-
-**Survey.** For each function, the survey says why it is not checkable yet. It also gives clues
-from the code: the fields that a parameter is read through, the literals that it is compared with,
-and whether it is used as money, a date or a list. The agent reads the schema, the forms, the tests
-and the docs, and writes `apex.profile.toml`. A person reviews that file like any other diff.
-
-```toml
-[project]
-timezones = ["UTC", "America/New_York"]        # date code runs in each
-
-[types]
-Invoice = "{ amount: number; status: 'draft' | 'active' | 'closed'; paid?: number }"
-
-[signatures]                                   # types for untyped functions; source unchanged
-"src/utils/invoices.js::isOpen" = "(inv: Invoice) => boolean"
-
-[[domains]]                                    # which values to draw
-params = ["*.amount"]
-kind = "decimal"
-places = 2
-note = "invoice amounts in dollars, from the invoice form"
-
-[[domains]]
-params = ["status"]
-values = ["draft", "active", "closed"]
-near_misses = true                             # unvalidated input: also "Active", " active"
-```
-
-**Runnable types.** Strings, floats, string enums, records (TS object types, interfaces, JSDoc
-`@typedef`, TypedDict, dataclasses), `dict[str, T]`, dates and `Date` have no Lean model. Apex
-generates them and runs the real code on them, for refutation and fuzzing. The generators prefer
-the inputs where application bugs occur:
-
-- decimals that floats cannot represent exactly (0.1, 1.15) and exact halves (1.005);
-- strings that are close to the expected values (case, spaces, a missing letter);
-- month ends, leap days, and daylight-saving transitions in each listed time zone;
-- records with each combination of optional fields.
-
-**References.** A reference property states that the function agrees with another
-implementation. Apex checks it by running both.
-
-```sh
-apex reference add src/totals.js::computeTotals --snapshot      # before a refactor
-apex reference add src/totals.js::computeTotals --git HEAD      # the committed version
-apex reference add src/fees.js::fee --exact --tolerance 0.005   # the same code, exact arithmetic
-apex refute src/totals.js::computeTotals                        # where they disagree
-```
-
-`--exact` runs the function's own code on exact rationals. For JavaScript, it uses Apex's
-conversion of the function to Python. Apex checks that conversion against the real JavaScript on
-each input before it uses the result. `--when "<condition>"` limits a reference to the inputs
-where it applies. A reference property can be `refuted` or `fuzzed`, never `proven`.
-
-**Decisions.** Sometimes a counterexample is intended behavior. Examples: a negative total that
-is rejected elsewhere, or a one-cent difference that the business accepts. Anyone can record the
-question with `apex decide <target> P2 --ask "..."`, and the report shows it (`NEEDS_DECISION`).
-Only a person in an interactive terminal can rule:
-
-- `--bug`: the counterexample is a defect.
-- `--intended --when "<condition>"`: the property applies only where the condition holds.
-- `--intended` alone: the property is withdrawn (`WITHDRAWN`).
-
-Rulings are stored in `.apex/decisions.json`. A ruling lapses when the property changes.
-
-The MCP server has the same functions: `apex_survey`, `apex_reference_add` and
-`apex_decision_ask`. The skill's [PROJECT.md](skill/apex-verify/references/PROJECT.md) gives the
-procedure to the agent.
-
-### Fuzzing and refutation
-
-Refutation runs during each check. It uses these methods:
-
-- The examples from the documentation and the tests.
-- Hypothesis property-based search.
-- CrossHair symbolic execution. CrossHair finds rare inputs that random search does not find.
-
-A fuzzing campaign runs for a longer time and records its results. Use it for code that Lean
-cannot model (for example strings, floats, or a loop Lean cannot show terminates), or for
-properties that neither the tactics nor the agent proved.
-
-```sh
-apex fuzz loops.py::isqrt --seconds 30          # Hypothesis campaign, recorded for each property
-apex fuzz loops.py::isqrt --engine atheris      # coverage-guided campaign (libFuzzer)
-apex fuzz loops.py::isqrt --executions 20000    # stops after 20000 calls; the result is reproducible
-apex check src/ --fuzz 10                       # fuzzes each property that Lean did not prove
-```
-
-These rules apply to fuzzing:
-
-- A campaign without a counterexample gives `fuzzed`. The evidence records the engine, the
-  number of executions and the number of skipped inputs.
-- Apex runs each counterexample again on the real code. If the failure occurs again, the
-  verdict is `refuted`.
-- The evidence becomes invalid when the function or the property changes.
-
-### TLA+ for concurrent code
-
-Lean cannot examine thread interleavings. TLA+ can. A concurrent function (threads, locks,
-shared state) gets a bundle in `.apex/tla/<module>/<function>/`. The bundle has three files:
-
-- `Spec.tla`: the specification. PlusCal is permitted.
-- `Spec.cfg`: the bounds and the invariants.
-- `harness.py`: a script that runs the real code and reports its shared state.
-
-```sh
-apex tla draft workers.py::worker               # an AI model writes a draft bundle
-apex review workers.py::worker --approve T_NoLostUpdate   # a person approves the bundle
-apex tla check workers.py::worker               # TLC on the specification, then the real code
-```
-
-TLC examines all states of the specification within the bounds. Then Apex runs the real code
-many times with different thread schedules. TLC examines each recorded run against the
-specification.
-
-| Result | Verdict |
-|---|---|
-| No violation, and all recorded runs agree with the specification | `model_checked` |
-| An invariant failed in a real run | `refuted` |
-| A real run that the specification does not permit | `fidelity_failed` |
-| TLC found a violation, but no real run showed it | `unproven`, with the TLC trace |
-
-**Controls.** An invariant that cannot fail proves nothing. A bundle can contain
-`controls/<name>.cfg` files. Each file is a TLC config for a design that must break an
-invariant, for example the design without its guard. Its first line states what TLC must find
-(`\* expect: violates NoLostUpdate`). If a control does not give its expected result, the
-invariants that it names get `unproven` (`CONTROL_FAILED`), not `model_checked`.
-
-### JavaScript and TypeScript
-
-Apex accepts `.ts`, `.mts`, `.js`, `.mjs`, `.jsx` and `.tsx` files, and JSX in `.js` files.
-The procedure is the same as for Python. Some modules are written for a bundler: they use
-extensionless imports, or they import a backend client when they load. Node cannot import such a
-module, so Apex runs an import-free copy of its own declarations. That copy also runs functions
-that the module does not export.
-
-```ts
-/**
- * Limit x to the range [lo, hi].
- * @pre lo <= hi
- * @post lo <= result && result <= hi
- * @post lo <= x && x <= hi ==> result === x
- * @example clamp(5, 0, 3) // => 3
- */
-export function clamp(x: number, lo: number, hi: number): number {
-  return Math.max(lo, Math.min(x, hi));
-}
-```
-
-```sh
-apex check src/                                  # Python, JavaScript and TypeScript files
-apex check shapes.ts::clamp
-apex fuzz search.ts::mix --engine jazzer         # coverage-guided JavaScript fuzzing
-```
-
-**Common parts.** The Lean engine, the fuzzing and refutation engine, statements, approval,
-reports, exit codes, SARIF, MCP and the skill are the same for all languages. Apex parses a
-JavaScript function with tree-sitter. Then it converts the function into the same subset that
-the Python translator uses. Thus, the proofs are Lean proofs. Refutation, fuzzing and the
-fidelity check run the real JavaScript in Node.js.
-
-**Differences for JavaScript.**
-
-| Item | Rule |
-|---|---|
-| Intent | JSDoc `@pre`, `@post` and `@example`. Jest and Vitest `expect(f(...)).toBe(v)`. node:assert. fast-check `fc.property(...)`: its bounds become premises. `<module>.spec.md`. |
-| Hints | JavaScript expressions. `result` is the return value and `==>` means "implies". |
-| Types | TypeScript types, JSDoc `@param {number} x` and `@returns {number}` (and `@typedef`) in plain JavaScript, or a signature in `apex.profile.toml`. A function without types gives a gap. String-literal unions, object types, `Record<string, T>` and `Date` are checked on the real code. |
-| `number` | A 64-bit float. Integer arithmetic is exact only up to 2⁵³ − 1. Proofs get `proven_conditional`, with the precondition that each intermediate value is a safe integer. Searches skip inputs outside this range. |
-| `bigint` | Exact. Proofs can get `proven`. |
-| Kept semantics | `%` truncates toward zero (`-3 % 2` is `-1`). Only `Math.floor(a / b)` and `Math.trunc(a / b)` are integer division. `===` on arrays compares references, thus Apex does not accept it. |
-| Not accepted by the Lean model | `==` (type conversion), bitwise operators (32-bit), `this`, classes, `try`, `switch`, strings, floats, array indexing (`undefined` out of range). Refutation and fuzzing still run such functions when they are pure. A `number` parameter is drawn as a float when a profile domain says so, or when float code has a decimal example or an `--exact` reference. |
-| Impure code | `console`, `Math.random`, `Date`, `fs`, `process`, `fetch`, timers, `async`, and changes to an argument. Apex finds these before it runs the code. |
-| Exports | A function that the module does not export runs from the module's import-free copy, if it uses no import. |
-| Engines | Lean 4 (proofs). Hypothesis and Jazzer.js (fuzzing). CrossHair and TLA+ are available for Python only. |
-
-### Continuous integration
+From the command line, `apex check` uses the installed `claude` or `codex` CLI by default, then
+an API key. Set `APEX_MODEL_PROVIDER=none` for a run without a model, for example in CI:
 
 ```yaml
-- run: apex check src/ --sarif apex.sarif   # exit code 1 stops the job; gaps (exit code 2) do not, unless fail_on says so
+- run: apex check src/ --sarif apex.sarif     # exit 1 fails the job; gaps (exit 2) do not
 - uses: github/codeql-action/upload-sarif@v3
   if: always()
   with: { sarif_file: apex.sarif }
 ```
 
-- **SARIF.** The verdict is the rule ID. Failures have the level `error`. `unproven` has the
-  level `warning`. Evidence verdicts have the level `note`. Proofs have the level `none`.
-- **Approvals.** Apex keeps approvals in `.apex/reviews.json`. Commit this file. Then CI gives
-  the same `proven` verdicts without a person at a terminal.
+For existing app code (untyped functions, records, float money, dates), the agent writes an
+`apex.profile.toml` with the project's types and value ranges, and owners record rulings on
+counterexamples with `apex decide`. See
+[existing projects](docs/USAGE.md#existing-projects-survey-profile-references-decisions).
 
-### Configuration
+## Documentation
 
-`apex init` writes the file `apex.toml`. All keys are optional.
-
-```toml
-[apex]
-model_provider = "auto"            # auto | claude-code | codex | anthropic | openai | host | none
-# model = "..."                    # if not set, the default model of the provider
-proof_budget_s = 120               # for each theorem: Lean time for one compile of its proof
-refute_budget_s = 10               # CrossHair time for each property
-fuzz_budget_s = 30                 # for each property: length of one fuzzing campaign
-fuzz_engine = "hypothesis"         # or "atheris" (Python) or "jazzer" (JavaScript)
-retries = 4                        # model proof attempts after the first; each gets the Lean errors
-llm_parallel = 4                   # number of theorems that a model works on at the same time
-confidence_floor = 0.6             # a property below this value gets SPEC_AMBIGUOUS
-fail_on = ["refuted", "fidelity_failed", "contradiction"]
-review_store = ".apex/reviews.json"
-ignore = ["tests/**", "migrations/**"]
-```
-
-## Architecture
-
-Apex is one pipeline with three verification engines. The shared front end reads the code and
-the intent. A router sends each function to the applicable engines. The shared back end makes
-one report from the results of all engines.
-
-```mermaid
-flowchart TB
-    subgraph IN["Code and intent"]
-      SRC[Function]
-      INT["Docstring or JSDoc, tests, English specification"]
-    end
-    SRC --> AN["Analysis<br/>purity, types, concurrency"]
-    SRC & INT --> FU["Intent fusion<br/>Intent Model, conflicts"]
-    AN --> RT{Router}
-    FU --> RT
-    RT -- "pure, in the Lean subset" --> LEAN
-    RT -- "pure" --> FUZZ
-    RT -- "concurrent" --> TLA
-    subgraph LEAN["Lean 4 engine"]
-      direction TB
-      L1["Translation to a Lean model"] --> L2["One theorem<br/>for each property"]
-      L2 --> L3["Proof search: tactics,<br/>then a model with Lean errors"]
-      L3 --> L4["Verdict path: cold compile,<br/>axiom audit"]
-      L4 --> L5["Fidelity check:<br/>Lean model against real code"]
-    end
-    subgraph FUZZ["Fuzzing and refutation engine"]
-      direction TB
-      F1["Examples from documentation and tests"] --> F2["Hypothesis, CrossHair"]
-      F2 --> F3["Fuzzing campaigns:<br/>Hypothesis, Atheris, Jazzer.js"]
-      F3 --> F4["Replay of each<br/>counterexample"]
-    end
-    subgraph TLA["TLA+ engine"]
-      direction TB
-      T1["Bundle: specification,<br/>bounds, harness"] --> T2["TLC: all interleavings<br/>within the bounds"]
-      T2 --> T3["Recorded runs of the real code<br/>with different schedules"]
-      T3 --> T4["Trace validation:<br/>runs against the specification"]
-    end
-    AP{{"Approval by a person:<br/>statements and specifications"}} -.-> LEAN
-    AP -.-> TLA
-    LEAN & FUZZ & TLA --> REP["Report<br/>verdicts, gaps, exit code,<br/>SARIF, explain, suggest"]
-```
-
-**Shared front end**
-
-1. **Analysis.** Apex finds the target and classifies it. The classes are pure or impure (I/O,
-   global state, randomness, floats), concurrent or not, and in the Lean subset or not. Apex
-   first converts a JavaScript or TypeScript function into the shared subset. The conversion
-   keeps the JavaScript semantics (truncated `%`, safe-integer `number`).
-2. **Intent fusion.** Apex reads the docstrings, tests, English specifications and leading
-   assertions. It makes one Intent Model with stable property IDs (P1, P2 for properties, E1 for
-   examples). It identifies conflicts between sources.
-3. **Routing.** Apex sends each function to each applicable engine:
-
-   | Function | Lean 4 | Fuzzing and refutation | TLA+ |
-   |---|---|---|---|
-   | Pure, in the subset | Proves | Also runs | Not applicable |
-   | Pure, not in the subset | Not applicable | Refutes or fuzzes | Not applicable |
-   | Concurrent | Not applicable | Not applicable | Model-checks |
-   | Other impure code (I/O) | Not applicable | Not applicable | Not applicable: `out_of_scope`, with the pure core |
-
-**Lean 4 engine** (the only source of `proven`)
-
-4. **Translation.** Apex translates the function into a Lean model. The translator accepts a
-   small subset of the language. It rejects each construct that it cannot model exactly.
-5. **Statements.** Apex writes one Lean theorem for each formal property. The same translator
-   translates the statements and the function. A person approves each statement.
-6. **Proof search.** Apex tries deterministic tactic tiers first (`decide`, `omega`, `simp`,
-   induction). Then an optional AI model tries, and gets the Lean errors and goal states.
-7. **Verdict path.** Apex compiles the specification cold. It rejects prohibited constructs
-   (`sorry`, `native_decide`, forged output). It audits the axioms against a fixed list.
-8. **Fidelity check.** Apex runs the compiled Lean model and the real code on 200 generated
-   inputs. A difference changes each proof of that function to `fidelity_failed`.
-
-**Fuzzing and refutation engine** (search on the real code)
-
-9. **Refutation.** During each check, Apex uses the examples, Hypothesis and CrossHair.
-10. **Fuzzing.** On request (`apex fuzz`, `apex check --fuzz`), Apex runs a recorded campaign
-    with Hypothesis, Atheris or Jazzer.js.
-11. **Replay.** Apex runs each counterexample again on the real code before the verdict becomes
-    `refuted`. A campaign without a counterexample gives `fuzzed`.
-
-**TLA+ engine** (concurrent code)
-
-12. **Specification.** The bundle contains the specification, the bounds, the invariants and a
-    harness that runs the real code. An AI model can write a draft. A person approves it.
-13. **Model checking.** TLC examines all interleavings that the specification permits, within
-    the bounds.
-14. **Trace validation.** Apex runs the real code many times with different thread schedules.
-    TLC examines each recorded run against the specification. An invariant failure in a real run
-    gives `refuted`. A run that the specification does not permit gives `fidelity_failed`.
-
-**Shared back end**
-
-15. **Report.** Apex gives one verdict for each property, with reason codes, next steps and the
-    exit code of the run. The output formats are Rich, Markdown, JSON and SARIF. `apex explain`
-    and `apex suggest` give explanations and changes.
-
-The packages follow the same structure:
-
-| Layer | Package | Contents |
-|---|---|---|
-| Contracts | `apex.core` | Verdicts, reason codes, Intent Model, report, configuration, JSON Schemas |
-| Front end | `apex.analyze`, `apex.intent` | Analysis and routing data, intent mining and fusion |
-| JavaScript front end | `apex.js` | tree-sitter parser, conversion to the shared subset, JSDoc, Jest and fast-check mining, Node.js bridge, Jazzer.js |
-| Lean 4 engine | `apex.translate`, `apex.theorems`, `apex.prove`, `apex.lean` | Translation, statements and review, proof search, pinned Lean project, verdict path |
-| Fuzzing and refutation engine | `apex.fidelity` | Refutation, fuzzing campaigns, fidelity bridge for the Lean engine |
-| TLA+ engine | `apex.tla` | Bundles, pinned TLC, run recorder, trace validation, drafts |
-| Models | `apex.llm` | Model providers: agent CLIs or API keys. Models only propose. |
-| Interfaces | `apex.cli`, `apex.mcp`, `apex.skill`, `apex.report` | CLI, MCP server, Agent Skill installer, output formats |
-| Orchestration | `apex.pipeline` | The deterministic commands that all interfaces call |
-
-All interfaces (CLI, MCP, skill) call the same pipeline functions. Thus, their behavior is the
-same. [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) gives the internal details of each engine.
-
-## Design principles
-
-1. **Result strength.** Each verdict states the strength of its result: all inputs, all
-   interleavings within bounds, N executions, or one observed failure. No output combines or
-   changes these strengths.
-2. **Source of `proven`.** Only the Lean verdict path sets `proven`, `proven_unreviewed` or
-   `proven_conditional`. Models, agents, fuzzing campaigns and TLC cannot set these verdicts.
-   `model_checked` and `fuzzed` are gap verdicts and give exit code 2.
-3. **Separation of proposal and decision.** All model output (hints, proofs, TLA+ bundles) goes
-   through a deterministic check before it can change a verdict.
-4. **Human approval of meaning.** A person approves each statement and each TLA+ bundle. Approval
-   needs an interactive terminal (stdin and stdout are TTYs). An agent cannot approve its own
-   work. A change to the function or to the statement makes the approval invalid.
-5. **Model fidelity.** Each model is compared with the real code before Apex reports a result
-   about it. The fidelity bridge compares the Lean models. Trace validation compares the TLA+
-   specifications. If they do not agree, Apex discards the result.
-6. **Observed failures.** `refuted` requires a run of the real code that shows the failure. A
-   violation that occurs only in a model stays a gap.
-7. **No approximation.** The translator rejects each construct that it cannot model exactly. The
-   rejection gives a gap with a reason code and a line number.
-8. **Gaps as output.** Each gap has a reason code and next steps. A run that examines no property
-   cannot give exit code 0.
-9. **Pinned tools.** Lean, Mathlib, TLC and Jazzer.js have pinned versions. TLC also has a pinned
-   checksum. A version change is a separate change, and the eval corpus must pass again.
-
-## Trust base
-
-Each verdict depends on these items:
-
-| Verdict | Depends on |
+| Document | Contents |
 |---|---|
-| `proven` | The Lean 4 kernel and the pinned Mathlib. The permitted axioms are only `propext`, `Classical.choice` and `Quot.sound`. The approved statement: Lean proves the statement as written. The translator: the proof is about the Lean model of the function. The fidelity check tests this model against the real code, but a test is not a proof. |
-| `model_checked` | TLC. The approved bundle, especially the harness: its `observe()` function defines the shared state that Apex compares. The bounds in `Spec.cfg`. The recorded runs: they are a sample of the thread schedules, not all schedules. |
-| `fuzzed` | The coverage of the campaign: an input that the campaign did not generate can break the property. The property hint: a hint that is always true does not find errors. |
-| `refuted` | Only the language runtime: Apex ran the real code and observed the failure. You can run the counterexample again. |
+| [Quickstart](docs/QUICKSTART.md) | A first run, step by step, with real output |
+| [Usage](docs/USAGE.md) | Intent and hints, every command, models and agents, app code, fuzzing, TLA+, JavaScript and TypeScript, CI, configuration |
+| [Limits](docs/LIMITS.md) | What each verdict does and does not mean, and what Apex cannot model |
+| [Architecture](docs/ARCHITECTURE.md) | The pipeline and engines, design principles, trust base, internals |
+| [Evaluation](docs/EVALUATION.md) | The eval corpus and its current results |
+| [Changelog](CHANGELOG.md) | What changed, phase by phase |
+| [Agent Skill](skill/apex-verify/SKILL.md) | The procedure coding agents follow |
 
-All verdicts are partial-correctness results. The preconditions (leading `assert` statements,
-`pre:` lines, "Requires:" items) limit each result. Outside the preconditions, the function has
-no specified behavior.
-
-## Limits
-
-[docs/LIMITS.md](docs/LIMITS.md) gives the full list. Summary:
-
-- **Lean 4 subset.**
-  - These items are not supported: `str`, `float`, `dict`, `set`, classes, `try`, module
-    constants, and calls into other modules.
-  - `while` loops and recursion need a termination measure that Lean proves. Apex tries some;
-    the coding agent can give one. A loop that terminates only under the preconditions has no
-    model.
-  - A proof covers the inputs on which the Python returns. Where the Python raises (an index out
-    of range, `x // 0`), the model returns a default; the fidelity check and refutation report
-    such inputs, and a precondition excludes them.
-  - Of 10 Python functions that Claude Code and Codex wrote from one-line prompts, 9 have a Lean
-    model. Having a model is not having a proof: Apex's tactics prove the simple properties, and
-    the coding agent writes the rest from Apex's proof tasks.
-- **Fuzzing.** A `fuzzed` verdict can occur for a function that has an error. In one test, a
-  20-second campaign did not find a planted error that a 60-second campaign found. CrossHair, not
-  the fuzzers, finds errors that need one exact input value.
-- **TLA+.**
-  - A result is valid only within the bounds. Two threads and two iterations is not N threads.
-  - Apex checks invariants only. It does not check temporal properties.
-  - Apex compares the specification only with the thread schedules that the recorded runs used.
-- **JavaScript.**
-  - A proof about `number` code is conditional. It is valid only while each intermediate value is
-    a safe integer. Use `bigint` for an unconditional proof.
-  - CrossHair and TLA+ are available for Python only.
-- **App code.**
-  - Apex checks runnable types (strings, floats, records, dates) by running the code. Lean
-    cannot prove properties about these types.
-  - Profile facts and references are only as good as their source. A domain or signature that
-    is read off the function body makes Apex check the code against itself.
-  - React components and functions with I/O stay out of scope. Move their logic into a plain
-    function.
-- **All engines.** Apex does not verify performance. A requirement such as "runs in linear time"
-  has no formal hint and stays as text.
-
-## Evaluation
-
-The eval corpus is the acceptance test for each phase. It has 171 cases: 126 in Python and 45 in
-JavaScript and TypeScript.
-
-| Category | Python | JavaScript and TypeScript |
-|---|---|---|
-| Correct functions, most with hand-written Lean reference statements | 51 | 20 |
-| Planted errors | 33 | 8 |
-| Specification and code conflicts | 15 | 3 |
-| Out-of-scope functions | 13 | 8 |
-| Functions that Claude Code and Codex wrote, without changes | 10 | 6 |
-| Concurrent functions with TLA+ bundles | 4 | 0 |
-
-`uv run python evals/run.py --jobs 4` gives these results (tactic tiers only, no model):
-
-| Measure | Result |
-|---|---|
-| False `proven` (must be 0) | 0 |
-| False evidence: `fuzzed` or `model_checked` on a property that must fail (must be 0) | 0 |
-| Cases with the expected verdicts | 171 of 171 (Python 126 of 126, JavaScript and TypeScript 45 of 45) |
-| Planted errors found with a counterexample | 63 of 63 (2 found only by a fuzzing campaign) |
-| Conflicts found | 22 of 22 |
-| Out-of-scope functions with the correct reason code | 21 of 21 |
-| Generated statements that Lean shows equal to the reference statement | 67 of 99 |
-| True properties proven (JavaScript `number` properties as `proven_conditional`) | 168 of 294 |
-| Agent-written functions in the Lean subset | 13 of 16 (7 before phase 9) |
-| Evidence verdicts | 24 `fuzzed`, 3 `model_checked` |
-| Median time for each function | 8.7 s |
-
-With a model in the proof search (`--provider claude-code`), an earlier corpus of 46 cases went
-from 56 of 82 to 82 of 82 true properties proven. False `proven` stayed at 0. This test was not
-done again on the full corpus.
+Current eval results: 171 of 171 cases as expected, 0 false `proven`, 0 false evidence, and 63
+of 63 planted bugs found with a counterexample.
 
 ## Development
 
@@ -875,38 +208,21 @@ uv run python evals/smoke/run.py              # real agents run the skill (uses 
 uv run ruff check . && uv run pyright
 ```
 
-The canary tests include proofs that try to bypass the verdict path (`sorry`, `admit`,
-`native_decide`, a user `axiom`, a forged audit line). Each test asserts that the axiom audit
-alone rejects the proof. Thus, an earlier check cannot hide a regression in the axiom audit.
+The canary tests include proofs that try to cheat (`sorry`, `admit`, `native_decide`, a user
+`axiom`, a forged audit line), and each asserts that the axiom audit alone rejects them.
 
 ```
-src/apex/        the package (see "Architecture")
+src/apex/        the package (see docs/ARCHITECTURE.md)
 lean/            the pinned Lake project: Lean 4.35.0, Mathlib 4.35.0, the Apex prelude
 skill/           the apex-verify Agent Skill
 packaging/       generated Claude Code plugin and Gemini CLI extension
 evals/           eval corpus, runner, agent smoke tests
 schemas/         JSON Schemas for all --json output
-docs/            quickstart, limits, architecture
-tests/           unit, Lean, installation, TLA+ and JavaScript tests; canaries; TLC output fixtures
+docs/            quickstart, usage, limits, architecture, evaluation
+tests/           unit, Lean, installation, TLA+ and JavaScript tests; canaries
 ```
 
-## Project history
-
-| Phase | Result |
-|---|---|
-| 0 | Lean harness: pinned toolchain, cold verdict compiler, axiom audit, canary tests |
-| 1 | Python pipeline: translation, statements, review, fidelity bridge, first proofs |
-| 2 | Four intent sources, fusion and conflicts, refutation, model providers |
-| 3 | `apex check`, model proof search, SARIF, exit-code contract |
-| 4 | MCP server and Agent Skill, tested in Claude Code and Codex |
-| 5 | Hardening: eval corpus, quickstart, limits page |
-| 6 | Fuzzing and refutation engine (campaigns), TLA+ engine for concurrent code |
-| 7 | JavaScript and TypeScript: conversion to the shared subset, Node.js bridge, JSDoc, Jest and fast-check intent, Jazzer.js |
-| 8 | App code: JSX, bundler modules, runnable types, project profile and survey, reference properties (refactors, exact arithmetic), decision records, TLA+ controls |
-| 9 | A larger Lean subset (early exits from loops, `while` loops and recursion with checked termination measures, indexing and slices, guard clauses, truthiness, `Optional` narrowing, more builtins) and proof work handed to the coding agent (proof tasks, goal states, Lean scratch commands, termination measures) |
-| 10 | App code formalized with the coding agent: profile domains on record fields, runtime types and domains in the formalization prompt, hints for float code, `apex_dec` for exact money values |
-
-The full list of changes is in [CHANGELOG.md](CHANGELOG.md).
+Record user-facing changes under **Unreleased** in the [changelog](CHANGELOG.md).
 
 ## License
 

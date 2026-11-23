@@ -1,10 +1,13 @@
 # Apex architecture
 
-The [README](../README.md#how-it-works) gives the overview: pipeline, layers and design
-principles. This page covers the parts that carry trust, in enough detail to review them.
+This page describes how Apex works: the pipeline and its three engines, the design rules, what
+each verdict trusts, and then the internals that carry trust, in enough detail to review them.
 
 ## Contents
 
+- [Overview](#overview)
+- [Design principles](#design-principles)
+- [Trust base](#trust-base)
 - [One pipeline, three surfaces](#one-pipeline-three-surfaces)
 - [The verdict path](#the-verdict-path)
 - [Spec files are a trust boundary](#spec-files-are-a-trust-boundary)
@@ -19,6 +22,161 @@ principles. This page covers the parts that carry trust, in enough detail to rev
 - [TLA+ for concurrent code](#tla-for-concurrent-code)
 - [Workspace layout](#workspace-layout)
 - [Pinning and installation](#pinning-and-installation)
+
+## Overview
+
+Apex is one pipeline with three verification engines. The shared front end reads the code and
+the intent. A router sends each function to the applicable engines. The shared back end makes
+one report from the results of all engines.
+
+```mermaid
+flowchart TB
+    subgraph IN["Code and intent"]
+      SRC[Function]
+      INT["Docstring or JSDoc, tests, English specification"]
+    end
+    SRC --> AN["Analysis<br/>purity, types, concurrency"]
+    SRC & INT --> FU["Intent fusion<br/>Intent Model, conflicts"]
+    AN --> RT{Router}
+    FU --> RT
+    RT -- "pure, in the Lean subset" --> LEAN
+    RT -- "pure" --> FUZZ
+    RT -- "concurrent" --> TLA
+    subgraph LEAN["Lean 4 engine"]
+      direction TB
+      L1["Translation to a Lean model"] --> L2["One theorem<br/>for each property"]
+      L2 --> L3["Proof search: tactics,<br/>then a model with Lean errors"]
+      L3 --> L4["Verdict path: cold compile,<br/>axiom audit"]
+      L4 --> L5["Fidelity check:<br/>Lean model against real code"]
+    end
+    subgraph FUZZ["Fuzzing and refutation engine"]
+      direction TB
+      F1["Examples from documentation and tests"] --> F2["Hypothesis, CrossHair"]
+      F2 --> F3["Fuzzing campaigns:<br/>Hypothesis, Atheris, Jazzer.js"]
+      F3 --> F4["Replay of each<br/>counterexample"]
+    end
+    subgraph TLA["TLA+ engine"]
+      direction TB
+      T1["Bundle: specification,<br/>bounds, harness"] --> T2["TLC: all interleavings<br/>within the bounds"]
+      T2 --> T3["Recorded runs of the real code<br/>with different schedules"]
+      T3 --> T4["Trace validation:<br/>runs against the specification"]
+    end
+    AP{{"Approval by a person:<br/>statements and specifications"}} -.-> LEAN
+    AP -.-> TLA
+    LEAN & FUZZ & TLA --> REP["Report<br/>verdicts, gaps, exit code,<br/>SARIF, explain, suggest"]
+```
+
+**Shared front end**
+
+1. **Analysis.** Apex finds the target and classifies it. The classes are pure or impure (I/O,
+   global state, randomness, floats), concurrent or not, and in the Lean subset or not. Apex
+   first converts a JavaScript or TypeScript function into the shared subset. The conversion
+   keeps the JavaScript semantics (truncated `%`, safe-integer `number`).
+2. **Intent fusion.** Apex reads the docstrings, tests, English specifications and leading
+   assertions. It makes one Intent Model with stable property IDs (P1, P2 for properties, E1 for
+   examples). It identifies conflicts between sources.
+3. **Routing.** Apex sends each function to each applicable engine:
+
+   | Function | Lean 4 | Fuzzing and refutation | TLA+ |
+   |---|---|---|---|
+   | Pure, in the subset | Proves | Also runs | Not applicable |
+   | Pure, not in the subset | Not applicable | Refutes or fuzzes | Not applicable |
+   | Concurrent | Not applicable | Not applicable | Model-checks |
+   | Other impure code (I/O) | Not applicable | Not applicable | Not applicable: `out_of_scope`, with the pure core |
+
+**Lean 4 engine** (the only source of `proven`)
+
+4. **Translation.** Apex translates the function into a Lean model. The translator accepts a
+   small subset of the language. It rejects each construct that it cannot model exactly.
+5. **Statements.** Apex writes one Lean theorem for each formal property. The same translator
+   translates the statements and the function. A person approves each statement.
+6. **Proof search.** Apex tries deterministic tactic tiers first (`decide`, `omega`, `simp`,
+   induction). Then an optional AI model tries, and gets the Lean errors and goal states.
+7. **Verdict path.** Apex compiles the specification cold. It rejects prohibited constructs
+   (`sorry`, `native_decide`, forged output). It audits the axioms against a fixed list.
+8. **Fidelity check.** Apex runs the compiled Lean model and the real code on 200 generated
+   inputs. A difference changes each proof of that function to `fidelity_failed`.
+
+**Fuzzing and refutation engine** (search on the real code)
+
+9. **Refutation.** During each check, Apex uses the examples, Hypothesis and CrossHair.
+10. **Fuzzing.** On request (`apex fuzz`, `apex check --fuzz`), Apex runs a recorded campaign
+    with Hypothesis, Atheris or Jazzer.js.
+11. **Replay.** Apex runs each counterexample again on the real code before the verdict becomes
+    `refuted`. A campaign without a counterexample gives `fuzzed`.
+
+**TLA+ engine** (concurrent code)
+
+12. **Specification.** The bundle contains the specification, the bounds, the invariants and a
+    harness that runs the real code. An AI model can write a draft. A person approves it.
+13. **Model checking.** TLC examines all interleavings that the specification permits, within
+    the bounds.
+14. **Trace validation.** Apex runs the real code many times with different thread schedules.
+    TLC examines each recorded run against the specification. An invariant failure in a real run
+    gives `refuted`. A run that the specification does not permit gives `fidelity_failed`.
+
+**Shared back end**
+
+15. **Report.** Apex gives one verdict for each property, with reason codes, next steps and the
+    exit code of the run. The output formats are Rich, Markdown, JSON and SARIF. `apex explain`
+    and `apex suggest` give explanations and changes.
+
+The packages follow the same structure:
+
+| Layer | Package | Contents |
+|---|---|---|
+| Contracts | `apex.core` | Verdicts, reason codes, Intent Model, report, configuration, JSON Schemas |
+| Front end | `apex.analyze`, `apex.intent` | Analysis and routing data, intent mining and fusion |
+| JavaScript front end | `apex.js` | tree-sitter parser, conversion to the shared subset, JSDoc, Jest and fast-check mining, Node.js bridge, Jazzer.js |
+| Lean 4 engine | `apex.translate`, `apex.theorems`, `apex.prove`, `apex.lean` | Translation, statements and review, proof search, pinned Lean project, verdict path |
+| Fuzzing and refutation engine | `apex.fidelity` | Refutation, fuzzing campaigns, fidelity bridge for the Lean engine |
+| TLA+ engine | `apex.tla` | Bundles, pinned TLC, run recorder, trace validation, drafts |
+| Models | `apex.llm` | Model providers: agent CLIs or API keys. Models only propose. |
+| Interfaces | `apex.cli`, `apex.mcp`, `apex.skill`, `apex.report` | CLI, MCP server, Agent Skill installer, output formats |
+| Orchestration | `apex.pipeline` | The deterministic commands that all interfaces call |
+
+All interfaces (CLI, MCP, skill) call the same pipeline functions. Thus, their behavior is the
+same. The sections after "Trust base" give the internal details of each engine.
+
+## Design principles
+
+1. **Result strength.** Each verdict states the strength of its result: all inputs, all
+   interleavings within bounds, N executions, or one observed failure. No output combines or
+   changes these strengths.
+2. **Source of `proven`.** Only the Lean verdict path sets `proven`, `proven_unreviewed` or
+   `proven_conditional`. Models, agents, fuzzing campaigns and TLC cannot set these verdicts.
+   `model_checked` and `fuzzed` are gap verdicts and give exit code 2.
+3. **Separation of proposal and decision.** All model output (hints, proofs, TLA+ bundles) goes
+   through a deterministic check before it can change a verdict.
+4. **Human approval of meaning.** A person approves each statement and each TLA+ bundle. Approval
+   needs an interactive terminal (stdin and stdout are TTYs). An agent cannot approve its own
+   work. A change to the function or to the statement makes the approval invalid.
+5. **Model fidelity.** Each model is compared with the real code before Apex reports a result
+   about it. The fidelity bridge compares the Lean models. Trace validation compares the TLA+
+   specifications. If they do not agree, Apex discards the result.
+6. **Observed failures.** `refuted` requires a run of the real code that shows the failure. A
+   violation that occurs only in a model stays a gap.
+7. **No approximation.** The translator rejects each construct that it cannot model exactly. The
+   rejection gives a gap with a reason code and a line number.
+8. **Gaps as output.** Each gap has a reason code and next steps. A run that examines no property
+   cannot give exit code 0.
+9. **Pinned tools.** Lean, Mathlib, TLC and Jazzer.js have pinned versions. TLC also has a pinned
+   checksum. A version change is a separate change, and the eval corpus must pass again.
+
+## Trust base
+
+Each verdict depends on these items:
+
+| Verdict | Depends on |
+|---|---|
+| `proven` | The Lean 4 kernel and the pinned Mathlib. The permitted axioms are only `propext`, `Classical.choice` and `Quot.sound`. The approved statement: Lean proves the statement as written. The translator: the proof is about the Lean model of the function. The fidelity check tests this model against the real code, but a test is not a proof. |
+| `model_checked` | TLC. The approved bundle, especially the harness: its `observe()` function defines the shared state that Apex compares. The bounds in `Spec.cfg`. The recorded runs: they are a sample of the thread schedules, not all schedules. |
+| `fuzzed` | The coverage of the campaign: an input that the campaign did not generate can break the property. The property hint: a hint that is always true does not find errors. |
+| `refuted` | Only the language runtime: Apex ran the real code and observed the failure. You can run the counterexample again. |
+
+All verdicts are partial-correctness results. The preconditions (leading `assert` statements,
+`pre:` lines, "Requires:" items) limit each result. Outside the preconditions, the function has
+no specified behavior.
 
 ## One pipeline, three surfaces
 

@@ -196,4 +196,5 @@ adds Jazzer.js for coverage-guided JS fuzzing (`apex fuzz shapes.ts::clamp --eng
 ## Next
 
 - [What Apex cannot prove](LIMITS.md): read it before trusting a verdict.
-- `apex check --help`, `apex explain`, and the README's exit-code table.
+- [Using Apex](USAGE.md): every command, agents, app code, fuzzing, TLA+, CI.
+- `apex check --help`, `apex explain`, and the [exit codes](../README.md#verdicts-and-exit-codes).

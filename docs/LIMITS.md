@@ -199,10 +199,25 @@ and every distinct run Apex recorded of the real code was a behavior of the spec
   the code under test, and a bug there would look like disagreeing sources. Refutation still
   checks it against the code.
 
+## App code
+
+- Strings, floats, records and dates have no Lean model. Apex checks them by running the real
+  code (refutation and fuzzing), so their best verdict is `fuzzed`, not `proven`.
+- Profile facts and references are only as good as their source. A domain or signature read off
+  the function body makes Apex check the code against itself.
+- A model's formal hint can be wrong in ways that refute correct code, for example a helper
+  called with the wrong record shape. Treat a refutation of a model-written hint as a question
+  until the counterexample is read.
+- React components and functions with I/O stay out of scope. Move their logic into a plain
+  function.
+- Races between asynchronous calls to a backend (read-modify-write on a database) are not
+  checked yet.
+
 ## Out of scope for this version
 
-- Languages other than Python (JavaScript and TypeScript are planned, not built).
-- Impure code beyond concurrency: I/O and floating point are reported, not modelled. Concurrency
-  gets TLA+ bundles (evidence, above), not proofs.
+- Languages other than Python, JavaScript and TypeScript.
+- Impure code beyond concurrency: I/O is reported, not modelled. Concurrency gets TLA+ bundles
+  (evidence, above), not proofs.
+- Performance requirements ("runs in linear time") have no formal hint and stay as text.
 - A second proof backend (SMT) or regression detection on previously proven code.
 - Lean and Mathlib are pinned. Upgrading them is a deliberate change, re-run against the corpus.

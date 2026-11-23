@@ -10,7 +10,13 @@ under **Unreleased** in the same pull request as the change.
 
 ## [Unreleased]
 
-Nothing yet.
+### Changed
+- The README is shorter (913 to about 230 lines): what Apex is, verdicts, install, quick start,
+  intent, agent use, and a documentation index. The full material moved to `docs/USAGE.md`
+  (intent, commands, agents, app code, fuzzing, TLA+, JS/TS, CI, configuration, install
+  details), `docs/ARCHITECTURE.md` (overview, design principles, trust base on top of the
+  internals) and `docs/EVALUATION.md`. `docs/LIMITS.md` gains an app-code section and an
+  up-to-date out-of-scope list.
 
 ## Phase 10: app code formalized with the coding agent (2026-11-24, `92ba22b`)
 
